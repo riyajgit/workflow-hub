@@ -3,7 +3,15 @@ name: Mirror ADO Repos to GitHub
 on:
   schedule:
     - cron: '0 18 * * *'   # Daily at 6 PM UTC
-  workflow_dispatch:         # Allow manual trigger anytime
+  workflow_dispatch:
+    inputs:
+      repos_to_mirror:
+        description: |
+          Comma-separated ado_repo names to persist as the mirror set (example: selfhost,hostedagent).
+          Leave blank to keep current selection.
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: write
@@ -16,13 +24,67 @@ jobs:
     steps:
       - name: Checkout workflow-hub repo
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Show available repos
+        run: |
+          echo "Available ado_repo values in repos.json:"
+          jq -r '.[].ado_repo' repos.json | sort -u | nl -ba
+
+      - name: Persist selected repos to repos.json
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.repos_to_mirror != '' }}
+        env:
+          REPOS_TO_MIRROR: ${{ github.event.inputs.repos_to_mirror }}
+        run: |
+          echo "Requested repos: $REPOS_TO_MIRROR"
+
+          SELECTED=$(printf '%s' "$REPOS_TO_MIRROR" | jq -R 'split(",") | map(gsub("^\\s+|\\s+$";"")) | map(select(length > 0)) | unique')
+          if [ "$(echo "$SELECTED" | jq 'length')" -eq 0 ]; then
+            echo "ERROR: repos_to_mirror is empty after parsing."
+            exit 1
+          fi
+
+          UNKNOWN=$(jq -n --argjson selected "$SELECTED" --slurpfile data repos.json '$selected - ($data[0] | map(.ado_repo) | unique)')
+          if [ "$(echo "$UNKNOWN" | jq 'length')" -gt 0 ]; then
+            echo "ERROR: Unknown repos in selection: $(echo "$UNKNOWN" | jq -r 'join(", ")')"
+            echo "Allowed repos are:"
+            jq -r '.[].ado_repo' repos.json | sort -u
+            exit 1
+          fi
+
+          jq --argjson selected "$SELECTED" '
+            map(. + {
+              enabled: (.ado_repo as $r | ($selected | index($r) != null))
+            })
+          ' repos.json > repos.json.tmp
+          mv repos.json.tmp repos.json
+
+          echo "Updated repos.json selection:"
+          jq -r '.[] | "- \(.ado_repo): enabled=\(.enabled)"' repos.json
+
+          if git diff --quiet -- repos.json; then
+            echo "No repos.json changes to commit."
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add repos.json
+            git commit -m "chore: update mirrored repo selection"
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+            echo "repos.json committed and pushed."
+          fi
 
       - name: Load repo list from repos.json
         id: set-matrix
         run: |
-          MATRIX=$(jq -c '.' repos.json)
+          MATRIX=$(jq -c '[ .[] | select((has("enabled") | not) or (.enabled == true)) ]' repos.json)
+          if [ "$(echo "$MATRIX" | jq 'length')" -eq 0 ]; then
+            echo "ERROR: No repos selected to mirror."
+            echo "Use workflow_dispatch input repos_to_mirror to set selection."
+            exit 1
+          fi
           echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
-          echo "Total repos to mirror: $(jq length repos.json)"
+          echo "Total repos to mirror: $(echo "$MATRIX" | jq length)"
 
   mirror:
     needs: load-repos
@@ -68,9 +130,10 @@ jobs:
       - name: Push to GitHub backup repo
         run: |
           cd ado-mirror
+          BACKUP_REPO="${{ matrix.repo.ado_repo }}_backup"
           git push --force --prune \
-            "https://x-access-token:${{ secrets.GH_PAT }}@github.com/${{ github.repository_owner }}/${{ env.BACKUP_REPO }}.git" \
+            "https://x-access-token:${{ secrets.GH_PAT }}@github.com/${{ github.repository_owner }}/${BACKUP_REPO}.git" \
             '+refs/heads/*:refs/heads/*' \
             '+refs/tags/*:refs/tags/*'
-          echo "Done -> github.com/${{ github.repository_owner }}/${{ env.BACKUP_REPO }}"
+          echo "Done -> github.com/${{ github.repository_owner }}/${BACKUP_REPO}"
 
