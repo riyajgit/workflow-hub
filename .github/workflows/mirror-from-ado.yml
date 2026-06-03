@@ -1,0 +1,67 @@
+name: Mirror ADO Repo to GitHub
+
+on:
+  workflow_dispatch:
+    inputs:
+      ado_org:
+        description: 'Azure DevOps Organization name'
+        required: true
+      ado_project:
+        description: 'Azure DevOps Project name'
+        required: true
+      ado_repo:
+        description: 'Azure DevOps Repository name'
+        required: true
+      visibility:
+        description: 'GitHub repo visibility'
+        required: true
+        default: 'private'
+        type: choice
+        options:
+          - private
+          - public
+
+permissions:
+  contents: write
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Validate secrets
+        run: |
+          if [ -z "${{ secrets.ADO_PAT }}" ]; then echo "ERROR: ADO_PAT secret is missing"; exit 1; fi
+          if [ -z "${{ secrets.GH_PAT }}" ];  then echo "ERROR: GH_PAT secret is missing";  exit 1; fi
+          echo "All secrets present."
+
+      - name: Create GitHub backup repo
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          BACKUP_REPO="${{ inputs.ado_repo }}_backup"
+          echo "BACKUP_REPO=$BACKUP_REPO" >> $GITHUB_ENV
+          echo "Creating GitHub repo: ${{ github.repository_owner }}/$BACKUP_REPO"
+          gh repo create "${{ github.repository_owner }}/$BACKUP_REPO" \
+            --${{ inputs.visibility }} \
+            --description "Mirror of ADO ${{ inputs.ado_org }}/${{ inputs.ado_project }}/${{ inputs.ado_repo }}" \
+          && echo "Repo created successfully." \
+          || echo "Repo already exists, continuing with mirror..."
+
+      - name: Clone from Azure DevOps (mirror)
+        run: |
+          git clone --mirror \
+            "https://${{ secrets.ADO_PAT }}@dev.azure.com/${{ inputs.ado_org }}/${{ inputs.ado_project }}/_git/${{ inputs.ado_repo }}" \
+            ado-mirror
+          echo "Cloned refs:"
+          git -C ado-mirror for-each-ref --format='%(refname)' refs/heads refs/tags | head -20
+
+      - name: Push to GitHub backup repo
+        run: |
+          cd ado-mirror
+          git push --force --prune \
+            "https://x-access-token:${{ secrets.GH_PAT }}@github.com/${{ github.repository_owner }}/${{ env.BACKUP_REPO }}.git" \
+            '+refs/heads/*:refs/heads/*' \
+            '+refs/tags/*:refs/tags/*'
+          echo "Mirror complete -> github.com/${{ github.repository_owner }}/${{ env.BACKUP_REPO }}"
+
