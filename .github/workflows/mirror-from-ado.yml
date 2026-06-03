@@ -179,33 +179,68 @@ jobs:
     if: ${{ failure() }}
     runs-on: ubuntu-latest
     steps:
-      - name: Build alert payload
-        id: payload
+      - name: Send Teams alert (if configured)
         env:
+          ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          REPO: ${{ github.repository }}
+          REF: ${{ github.ref_name }}
+          ACTOR: ${{ github.actor }}
         run: |
-          ALERT_TEXT="DR mirror workflow FAILED\nRepository: ${{ github.repository }}\nBranch/Ref: ${{ github.ref_name }}\nActor: ${{ github.actor }}\nRun: $RUN_URL"
-          PAYLOAD=$(jq -cn --arg text "$ALERT_TEXT" '{text: $text}')
-          echo "payload=$PAYLOAD" >> "$GITHUB_OUTPUT"
           {
             echo "## DR Mirror Failure Alert"
-            echo "- Repository: ${{ github.repository }}"
-            echo "- Ref: ${{ github.ref_name }}"
-            echo "- Actor: ${{ github.actor }}"
+            echo "- Repository: $REPO"
+            echo "- Ref: $REF"
+            echo "- Actor: $ACTOR"
             echo "- Run URL: $RUN_URL"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Send webhook alert (if configured)
-        env:
-          ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
-          PAYLOAD: ${{ steps.payload.outputs.payload }}
-        run: |
-          if [ -n "$ALERT_WEBHOOK_URL" ]; then
-            curl -sS -X POST "$ALERT_WEBHOOK_URL" \
-              -H 'Content-Type: application/json' \
-              -d "$PAYLOAD"
-            echo "Failure alert sent to configured webhook."
-          else
+          if [ -z "$ALERT_WEBHOOK_URL" ]; then
             echo "ALERT_WEBHOOK_URL secret is not configured; skipping external notification."
+            exit 0
           fi
+
+          PAYLOAD=$(jq -cn \
+            --arg repo  "$REPO" \
+            --arg ref   "$REF" \
+            --arg actor "$ACTOR" \
+            --arg url   "$RUN_URL" \
+            '{
+              "type": "AdaptiveCard",
+              "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+              "version": "1.4",
+              "body": [
+                {
+                  "type": "TextBlock",
+                  "size": "Medium",
+                  "weight": "Bolder",
+                  "color": "Attention",
+                  "text": "🚨 DR Mirror Workflow FAILED"
+                },
+                {
+                  "type": "FactSet",
+                  "facts": [
+                    { "title": "Repository", "value": $repo  },
+                    { "title": "Branch/Ref", "value": $ref   },
+                    { "title": "Actor",      "value": $actor },
+                    { "title": "Run URL",    "value": $url   }
+                  ]
+                },
+                {
+                  "type": "ActionSet",
+                  "actions": [
+                    {
+                      "type": "Action.OpenUrl",
+                      "title": "View Run",
+                      "url": $url
+                    }
+                  ]
+                }
+              ]
+            }')
+
+          curl -sS -X POST "$ALERT_WEBHOOK_URL" \
+            -H 'Content-Type: application/json' \
+            -d "$PAYLOAD"
+          echo "Teams Adaptive Card alert sent."
 
