@@ -5,10 +5,21 @@ on:
     - cron: '0 18 * * *'   # Daily at 6 PM UTC
   workflow_dispatch:
     inputs:
+      ado_org:
+        description: Azure DevOps organization name
+        required: true
+        default: 'binhsps'
+        type: string
+      ado_project:
+        description: Azure DevOps project name
+        required: true
+        default: 'Test1'
+        type: string
       repos_to_mirror:
         description: |
           Comma-separated ado_repo names to persist as the mirror set (example: selfhost,hostedagent).
-          Leave blank to keep current selection.
+          Repositories are validated against the live Azure DevOps repo list.
+          Leave blank to only display available repos.
         required: false
         default: ''
         type: string
@@ -27,14 +38,37 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Show available repos
+      - name: Fetch available repos from Azure DevOps
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        env:
+          ADO_ORG: ${{ github.event.inputs.ado_org }}
+          ADO_PROJECT: ${{ github.event.inputs.ado_project }}
+          ADO_PAT: ${{ secrets.ADO_PAT }}
         run: |
-          echo "Available ado_repo values in repos.json:"
-          jq -r '.[].ado_repo' repos.json | sort -u | nl -ba
+          if [ -z "$ADO_PAT" ]; then
+            echo "ERROR: ADO_PAT secret is missing"
+            exit 1
+          fi
+
+          curl -sS -u ":$ADO_PAT" \
+            "https://dev.azure.com/$ADO_ORG/$ADO_PROJECT/_apis/git/repositories?api-version=7.1-preview.1" \
+            > ado-repos-raw.json
+
+          jq -r '.value | map(.name) | sort | unique' ado-repos-raw.json > ado-repos.json
+
+          echo "Available repositories from Azure DevOps ($ADO_ORG/$ADO_PROJECT):"
+          jq -r '.[]' ado-repos.json | nl -ba
+
+          if [ "$(jq 'length' ado-repos.json)" -eq 0 ]; then
+            echo "ERROR: No repositories found in Azure DevOps project."
+            exit 1
+          fi
 
       - name: Persist selected repos to repos.json
         if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.repos_to_mirror != '' }}
         env:
+          ADO_ORG: ${{ github.event.inputs.ado_org }}
+          ADO_PROJECT: ${{ github.event.inputs.ado_project }}
           REPOS_TO_MIRROR: ${{ github.event.inputs.repos_to_mirror }}
         run: |
           echo "Requested repos: $REPOS_TO_MIRROR"
@@ -45,19 +79,22 @@ jobs:
             exit 1
           fi
 
-          UNKNOWN=$(jq -n --argjson selected "$SELECTED" --slurpfile data repos.json '$selected - ($data[0] | map(.ado_repo) | unique)')
+          UNKNOWN=$(jq -n --argjson selected "$SELECTED" --slurpfile available ado-repos.json '$selected - $available[0]')
           if [ "$(echo "$UNKNOWN" | jq 'length')" -gt 0 ]; then
             echo "ERROR: Unknown repos in selection: $(echo "$UNKNOWN" | jq -r 'join(", ")')"
             echo "Allowed repos are:"
-            jq -r '.[].ado_repo' repos.json | sort -u
+            jq -r '.[]' ado-repos.json
             exit 1
           fi
 
-          jq --argjson selected "$SELECTED" '
-            map(. + {
-              enabled: (.ado_repo as $r | ($selected | index($r) != null))
+          jq -n --arg org "$ADO_ORG" --arg project "$ADO_PROJECT" --argjson selected "$SELECTED" '
+            $selected | map({
+              ado_org: $org,
+              ado_project: $project,
+              ado_repo: .,
+              enabled: true
             })
-          ' repos.json > repos.json.tmp
+          ' > repos.json.tmp
           mv repos.json.tmp repos.json
 
           echo "Updated repos.json selection:"
