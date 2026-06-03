@@ -1,32 +1,36 @@
-name: Mirror ADO Repo to GitHub
+name: Mirror ADO Repos to GitHub
 
 on:
-  workflow_dispatch:
-    inputs:
-      ado_org:
-        description: 'Azure DevOps Organization name'
-        required: true
-      ado_project:
-        description: 'Azure DevOps Project name'
-        required: true
-      ado_repo:
-        description: 'Azure DevOps Repository name'
-        required: true
-      visibility:
-        description: 'GitHub repo visibility'
-        required: true
-        default: 'private'
-        type: choice
-        options:
-          - private
-          - public
+  schedule:
+    - cron: '0 18 * * *'   # Daily at 6 PM UTC
+  workflow_dispatch:         # Allow manual trigger anytime
 
 permissions:
   contents: write
 
 jobs:
-  mirror:
+  load-repos:
     runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Checkout workflow-hub repo
+        uses: actions/checkout@v4
+
+      - name: Load repo list from repos.json
+        id: set-matrix
+        run: |
+          MATRIX=$(jq -c '.' repos.json)
+          echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
+          echo "Total repos to mirror: $(jq length repos.json)"
+
+  mirror:
+    needs: load-repos
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        repo: ${{ fromJson(needs.load-repos.outputs.matrix) }}
+      fail-fast: false   # Continue mirroring other repos even if one fails
 
     steps:
       - name: Validate secrets
@@ -35,25 +39,24 @@ jobs:
           if [ -z "${{ secrets.GH_PAT }}" ];  then echo "ERROR: GH_PAT secret is missing";  exit 1; fi
           echo "All secrets present."
 
-      - name: Create GitHub backup repo
+      - name: Create GitHub backup repo (if not exists)
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
         run: |
-          BACKUP_REPO="${{ inputs.ado_repo }}_backup"
+          BACKUP_REPO="${{ matrix.repo.ado_repo }}_backup"
           echo "BACKUP_REPO=$BACKUP_REPO" >> $GITHUB_ENV
-          echo "Creating GitHub repo: ${{ github.repository_owner }}/$BACKUP_REPO"
           gh repo create "${{ github.repository_owner }}/$BACKUP_REPO" \
-            --${{ inputs.visibility }} \
-            --description "Mirror of ADO ${{ inputs.ado_org }}/${{ inputs.ado_project }}/${{ inputs.ado_repo }}" \
-          && echo "Repo created successfully." \
-          || echo "Repo already exists, continuing with mirror..."
+            --private \
+            --description "Mirror of ADO: ${{ matrix.repo.ado_org }}/${{ matrix.repo.ado_project }}/${{ matrix.repo.ado_repo }}" \
+          && echo "Repo $BACKUP_REPO created." \
+          || echo "Repo $BACKUP_REPO already exists, syncing..."
 
       - name: Clone from Azure DevOps (mirror)
         run: |
           git clone --mirror \
-            "https://${{ secrets.ADO_PAT }}@dev.azure.com/${{ inputs.ado_org }}/${{ inputs.ado_project }}/_git/${{ inputs.ado_repo }}" \
+            "https://${{ secrets.ADO_PAT }}@dev.azure.com/${{ matrix.repo.ado_org }}/${{ matrix.repo.ado_project }}/_git/${{ matrix.repo.ado_repo }}" \
             ado-mirror
-          echo "Cloned refs:"
+          echo "Refs cloned:"
           git -C ado-mirror for-each-ref --format='%(refname)' refs/heads refs/tags | head -20
 
       - name: Push to GitHub backup repo
@@ -63,5 +66,5 @@ jobs:
             "https://x-access-token:${{ secrets.GH_PAT }}@github.com/${{ github.repository_owner }}/${{ env.BACKUP_REPO }}.git" \
             '+refs/heads/*:refs/heads/*' \
             '+refs/tags/*:refs/tags/*'
-          echo "Mirror complete -> github.com/${{ github.repository_owner }}/${{ env.BACKUP_REPO }}"
+          echo "Done -> github.com/${{ github.repository_owner }}/${{ env.BACKUP_REPO }}"
 
