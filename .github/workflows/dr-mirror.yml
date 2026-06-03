@@ -1,0 +1,178 @@
+name: DR - Mirror ADO Repos to GitHub
+
+# PURPOSE: Mirrors all enabled repos from repos.json (ADO → GitHub) on a daily schedule.
+#          To change WHICH repos are mirrored, run dr-select-repos.yml first.
+#
+# WORKFLOW: dr-select-repos.yml  →  updates repos.json
+#           dr-mirror.yml        →  reads repos.json and mirrors on schedule
+
+on:
+  schedule:
+    - cron: '0 18 * * *'   # Daily at 6 PM UTC
+  workflow_dispatch:         # Allow manual trigger anytime
+
+permissions:
+  contents: write
+
+# Prevent a scheduled run and a manual run from overlapping.
+# Never cancel an in-progress mirror — always let it finish cleanly.
+concurrency:
+  group: dr-mirror
+  cancel-in-progress: false
+
+jobs:
+  load-repos:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Load enabled repos from repos.json
+        id: set-matrix
+        run: |
+          MATRIX=$(jq -c '[ .[] | select((has("enabled") | not) or (.enabled == true)) ]' repos.json)
+          COUNT=$(echo "$MATRIX" | jq 'length')
+
+          if [ "$COUNT" -eq 0 ]; then
+            echo "ERROR: No repos enabled in repos.json."
+            echo "Run the 'DR - Select Repos to Mirror' workflow to configure your selection."
+            exit 1
+          fi
+
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+          echo "Repos queued for mirroring: $COUNT"
+
+          {
+            echo "## DR Mirror Run — $(date -u '+%Y-%m-%d %H:%M UTC')"
+            echo "**Repos queued:** $COUNT"
+            echo ""
+            echo "$MATRIX" | jq -r '.[] | "- `" + .ado_repo + "`"'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  mirror:
+    needs: load-repos
+    runs-on: ubuntu-latest
+    timeout-minutes: 30      # Per-repo timeout — prevents one stuck repo blocking others
+    strategy:
+      matrix:
+        repo: ${{ fromJson(needs.load-repos.outputs.matrix) }}
+      fail-fast: false        # Continue mirroring remaining repos even if one fails
+
+    steps:
+      - name: Validate secrets
+        run: |
+          if [ -z "${{ secrets.ADO_PAT }}" ]; then echo "ERROR: ADO_PAT secret is missing"; exit 1; fi
+          if [ -z "${{ secrets.GH_PAT }}" ];  then echo "ERROR: GH_PAT secret is missing";  exit 1; fi
+          echo "Secrets OK."
+
+      - name: Create GitHub backup repo (if not exists)
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          BACKUP_REPO="${{ matrix.repo.ado_repo }}_backup"
+          gh repo create "${{ github.repository_owner }}/$BACKUP_REPO" \
+            --private \
+            --description "DR backup — ADO: ${{ matrix.repo.ado_org }}/${{ matrix.repo.ado_project }}/${{ matrix.repo.ado_repo }}" \
+          && echo "Repo $BACKUP_REPO created." \
+          || echo "Repo $BACKUP_REPO already exists, syncing..."
+
+      - name: Clone from Azure DevOps (mirror)
+        run: |
+          git clone --mirror \
+            "https://${{ secrets.ADO_PAT }}@dev.azure.com/${{ matrix.repo.ado_org }}/${{ matrix.repo.ado_project }}/_git/${{ matrix.repo.ado_repo }}" \
+            ado-mirror
+          echo "Refs cloned:"
+          git -C ado-mirror for-each-ref --format='%(refname)' refs/heads refs/tags | head -20
+
+      - name: Strip large files from history (>100MB)
+        run: |
+          pip install git-filter-repo --quiet
+          cd ado-mirror && git filter-repo --strip-blobs-bigger-than 100M --force
+          echo "Large blobs stripped."
+
+      - name: Push to GitHub backup repo
+        run: |
+          cd ado-mirror
+          BACKUP_REPO="${{ matrix.repo.ado_repo }}_backup"
+          git push --force --prune \
+            "https://x-access-token:${{ secrets.GH_PAT }}@github.com/${{ github.repository_owner }}/${BACKUP_REPO}.git" \
+            '+refs/heads/*:refs/heads/*' \
+            '+refs/tags/*:refs/tags/*'
+          echo "Done -> github.com/${{ github.repository_owner }}/${BACKUP_REPO}"
+
+  # ─── FAILURE ALERTING ────────────────────────────────────────────────────────
+  # Controlled by repository variable ALERTING_ENABLED.
+  # To enable:  Settings → Variables → Actions → ALERTING_ENABLED = true
+  # To disable: delete the variable or set it to anything other than 'true'
+  # ─────────────────────────────────────────────────────────────────────────────
+  notify-on-failure:
+    needs: [load-repos, mirror]
+    if: ${{ failure() && vars.ALERTING_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send Teams alert (if configured)
+        env:
+          ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          REPO: ${{ github.repository }}
+          REF: ${{ github.ref_name }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          {
+            echo "## DR Mirror Failure Alert"
+            echo "- Repository: $REPO"
+            echo "- Ref: $REF"
+            echo "- Actor: $ACTOR"
+            echo "- Run URL: $RUN_URL"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ -z "$ALERT_WEBHOOK_URL" ]; then
+            echo "ALERT_WEBHOOK_URL secret is not configured; skipping external notification."
+            exit 0
+          fi
+
+          PAYLOAD=$(jq -cn \
+            --arg repo  "$REPO" \
+            --arg ref   "$REF" \
+            --arg actor "$ACTOR" \
+            --arg url   "$RUN_URL" \
+            '{
+              "type": "AdaptiveCard",
+              "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+              "version": "1.4",
+              "body": [
+                {
+                  "type": "TextBlock",
+                  "size": "Medium",
+                  "weight": "Bolder",
+                  "color": "Attention",
+                  "text": "🚨 DR Mirror Workflow FAILED"
+                },
+                {
+                  "type": "FactSet",
+                  "facts": [
+                    { "title": "Repository", "value": $repo  },
+                    { "title": "Branch/Ref", "value": $ref   },
+                    { "title": "Actor",      "value": $actor },
+                    { "title": "Run URL",    "value": $url   }
+                  ]
+                },
+                {
+                  "type": "ActionSet",
+                  "actions": [
+                    {
+                      "type": "Action.OpenUrl",
+                      "title": "View Run",
+                      "url": $url
+                    }
+                  ]
+                }
+              ]
+            }')
+
+          curl -sS -X POST "$ALERT_WEBHOOK_URL" \
+            -H 'Content-Type: application/json' \
+            -d "$PAYLOAD"
+          echo "Teams Adaptive Card alert sent."

@@ -1,0 +1,158 @@
+name: DR - Select Repos to Mirror
+
+# PURPOSE: Run this workflow ONCE (or whenever you want to change which repos are mirrored).
+#          It fetches the live repo list from Azure DevOps, validates your selection,
+#          and persists the result into repos.json so the mirror workflow picks it up.
+#
+# WORKFLOW: dr-select-repos.yml  →  updates repos.json
+#           dr-mirror.yml        →  reads repos.json and mirrors on schedule
+
+on:
+  workflow_dispatch:
+    inputs:
+      ado_org:
+        description: Azure DevOps organization name
+        required: true
+        default: 'binhsps'
+        type: string
+      ado_project:
+        description: Azure DevOps project name
+        required: true
+        default: 'Test1'
+        type: string
+      repos_to_mirror:
+        description: |
+          Comma-separated repo names to enable for daily mirroring (e.g. selfhost,hostedagent).
+          Leave blank to only list available repos without changing the current selection.
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: write
+
+# Prevent two selection runs from committing repos.json simultaneously.
+concurrency:
+  group: dr-select-repos
+  cancel-in-progress: false
+
+jobs:
+  select-repos:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate secrets
+        env:
+          ADO_PAT: ${{ secrets.ADO_PAT }}
+        run: |
+          if [ -z "$ADO_PAT" ]; then
+            echo "ERROR: ADO_PAT secret is missing."
+            exit 1
+          fi
+          echo "Secrets OK."
+
+      - name: Fetch available repos from Azure DevOps
+        id: fetch
+        env:
+          ADO_ORG: ${{ github.event.inputs.ado_org }}
+          ADO_PROJECT: ${{ github.event.inputs.ado_project }}
+          ADO_PAT: ${{ secrets.ADO_PAT }}
+        run: |
+          HTTP_CODE=$(curl -sS -w "%{http_code}" -o ado-repos-raw.json \
+            -u ":$ADO_PAT" \
+            "https://dev.azure.com/$ADO_ORG/$ADO_PROJECT/_apis/git/repositories?api-version=7.1-preview.1")
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "ERROR: Azure DevOps API returned HTTP $HTTP_CODE"
+            cat ado-repos-raw.json
+            exit 1
+          fi
+
+          jq -r '[.value[].name] | sort | unique' ado-repos-raw.json > ado-repos.json
+
+          COUNT=$(jq 'length' ado-repos.json)
+          if [ "$COUNT" -eq 0 ]; then
+            echo "ERROR: No repositories found in $ADO_ORG/$ADO_PROJECT."
+            exit 1
+          fi
+
+          echo "Available repositories in $ADO_ORG/$ADO_PROJECT ($COUNT total):"
+          jq -r '.[]' ado-repos.json | nl -ba
+
+          {
+            echo "## Available Repos in Azure DevOps"
+            echo "**Org:** \`$ADO_ORG\` | **Project:** \`$ADO_PROJECT\`"
+            echo ""
+            jq -r '.[] | "- `" + . + "`"' ado-repos.json
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Update repos.json with selection
+        if: ${{ github.event.inputs.repos_to_mirror != '' }}
+        env:
+          ADO_ORG: ${{ github.event.inputs.ado_org }}
+          ADO_PROJECT: ${{ github.event.inputs.ado_project }}
+          REPOS_TO_MIRROR: ${{ github.event.inputs.repos_to_mirror }}
+        run: |
+          echo "Requested selection: $REPOS_TO_MIRROR"
+
+          SELECTED=$(printf '%s' "$REPOS_TO_MIRROR" \
+            | jq -R 'split(",") | map(gsub("^\\s+|\\s+$";"")) | map(select(length > 0)) | unique')
+
+          if [ "$(echo "$SELECTED" | jq 'length')" -eq 0 ]; then
+            echo "ERROR: Selection is empty after parsing."
+            exit 1
+          fi
+
+          UNKNOWN=$(jq -n --argjson sel "$SELECTED" --slurpfile avail ado-repos.json \
+            '$sel - $avail[0]')
+
+          if [ "$(echo "$UNKNOWN" | jq 'length')" -gt 0 ]; then
+            echo "ERROR: These repos were not found in Azure DevOps:"
+            echo "$UNKNOWN" | jq -r '.[]'
+            echo "Available repos:"
+            jq -r '.[]' ado-repos.json
+            exit 1
+          fi
+
+          # Rebuild repos.json from scratch with only the selected repos enabled.
+          jq -n \
+            --arg org "$ADO_ORG" \
+            --arg project "$ADO_PROJECT" \
+            --argjson selected "$SELECTED" \
+            '$selected | map({
+              ado_org:     $org,
+              ado_project: $project,
+              ado_repo:    .,
+              enabled:     true
+            })' > repos.json.tmp
+          mv repos.json.tmp repos.json
+
+          echo "repos.json updated:"
+          jq -r '.[] | "  \(.ado_repo): enabled=\(.enabled)"' repos.json
+
+          if git diff --quiet -- repos.json; then
+            echo "No change in selection — nothing to commit."
+          else
+            git config user.name  "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add repos.json
+            git commit -m "chore(dr): update mirror selection [${{ github.actor }}]"
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+            echo "repos.json committed and pushed."
+          fi
+
+      - name: Summarise current selection
+        run: |
+          {
+            echo ""
+            echo "## Current Mirror Selection (repos.json)"
+            if jq -e 'length > 0' repos.json > /dev/null 2>&1; then
+              jq -r '.[] | "- `" + .ado_repo + "` — enabled: **" + (.enabled | tostring) + "**"' repos.json
+            else
+              echo "_repos.json is empty — run this workflow again with repos_to_mirror filled in._"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
