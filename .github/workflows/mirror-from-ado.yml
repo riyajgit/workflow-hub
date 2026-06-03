@@ -31,7 +31,7 @@ jobs:
   load-repos:
     runs-on: ubuntu-latest
     outputs:
-      matrix: ${{ steps.set-matrix.outputs.matrix }}}
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
     steps:
       - name: Checkout workflow-hub repo
         uses: actions/checkout@v4
@@ -159,7 +159,7 @@ jobs:
           git -C ado-mirror for-each-ref --format='%(refname)' refs/heads refs/tags | head -20
 
       - name: Strip large files from history (>100MB)
-        run: |
+        run1: |
           pip install git-filter-repo --quiet
           cd ado-mirror && git filter-repo --strip-blobs-bigger-than 100M --force
           echo "Large blobs stripped."
