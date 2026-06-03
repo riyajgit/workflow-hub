@@ -185,7 +185,7 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           ALERT_TEXT="DR mirror workflow FAILED\nRepository: ${{ github.repository }}\nBranch/Ref: ${{ github.ref_name }}\nActor: ${{ github.actor }}\nRun: $RUN_URL"
-          PAYLOAD=$(jq -n --arg text "$ALERT_TEXT" '{text: $text}')
+          PAYLOAD=$(jq -cn --arg text "$ALERT_TEXT" '{text: $text}')
           echo "payload=$PAYLOAD" >> "$GITHUB_OUTPUT"
           {
             echo "## DR Mirror Failure Alert"
