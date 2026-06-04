@@ -145,6 +145,19 @@ jobs:
           if [ -z "${{ secrets.GH_PAT }}" ];  then echo "ERROR: GH_PAT missing";  exit 1; fi
           echo "Secrets OK."
 
+      - name: URL-encode org and project for API/git URLs
+        env:
+          TARGET_ORG:     ${{ github.event.inputs.target_ado_org }}
+          TARGET_PROJECT: ${{ github.event.inputs.target_ado_project }}
+        run: |
+          # Encode once here and export so every subsequent step gets correct URLs
+          ORG_ENC=$(python3 -c "import urllib.parse, os; print(urllib.parse.quote(os.environ['TARGET_ORG'], safe=''))")
+          PROJ_ENC=$(python3 -c "import urllib.parse, os; print(urllib.parse.quote(os.environ['TARGET_PROJECT'], safe=''))")
+          echo "TARGET_ORG_ENC=$ORG_ENC"     >> "$GITHUB_ENV"
+          echo "TARGET_PROJECT_ENC=$PROJ_ENC" >> "$GITHUB_ENV"
+          echo "Encoded: '${{ github.event.inputs.target_ado_org }}' → '$ORG_ENC'"
+          echo "Encoded: '${{ github.event.inputs.target_ado_project }}' → '$PROJ_ENC'"
+
       - name: Safety check — refuse if restore target already exists
         env:
           ADO_PAT:        ${{ secrets.ADO_PAT }}
@@ -153,7 +166,7 @@ jobs:
         run: |
           HTTP=$(curl -sS -w "%{http_code}" -o /dev/null \
             -u ":$ADO_PAT" \
-            "https://dev.azure.com/$TARGET_ORG/$TARGET_PROJECT/_apis/git/repositories/$RESTORE_REPO?api-version=7.1-preview.1")
+            "https://dev.azure.com/$TARGET_ORG_ENC/$TARGET_PROJECT_ENC/_apis/git/repositories/$RESTORE_REPO?api-version=7.1-preview.1")
 
           if [ "$HTTP" = "200" ]; then
             echo "ERROR: '$RESTORE_REPO' already exists in $TARGET_ORG/$TARGET_PROJECT."
@@ -174,7 +187,7 @@ jobs:
             -u ":$ADO_PAT" \
             -H "Content-Type: application/json" \
             -d "{\"name\":\"$RESTORE_REPO\"}" \
-            "https://dev.azure.com/$TARGET_ORG/$TARGET_PROJECT/_apis/git/repositories?api-version=7.1-preview.1")
+            "https://dev.azure.com/$TARGET_ORG_ENC/$TARGET_PROJECT_ENC/_apis/git/repositories?api-version=7.1-preview.1")
 
           if [ "$HTTP" != "201" ]; then
             echo "ERROR: Failed to create ADO repo (HTTP $HTTP)"
@@ -270,7 +283,7 @@ jobs:
         run: |
           cd restore-mirror
           git push --force \
-            "https://:$ADO_PAT@dev.azure.com/$TARGET_ORG/$TARGET_PROJECT/_git/$RESTORE_REPO" \
+            "https://:$ADO_PAT@dev.azure.com/$TARGET_ORG_ENC/$TARGET_PROJECT_ENC/_git/$RESTORE_REPO" \
             '+refs/heads/*:refs/heads/*' \
             '+refs/tags/*:refs/tags/*'
 
@@ -290,18 +303,12 @@ jobs:
                            | head -1)
 
           # ── Counts from ADO restore target (live remote) ──
-          ADO_BRANCHES=$(git ls-remote --heads \
-            "https://:$ADO_PAT@dev.azure.com/$TARGET_ORG/$TARGET_PROJECT/_git/$RESTORE_REPO" \
-            | wc -l | tr -d ' ')
-          ADO_TAGS=$(git ls-remote --tags \
-            "https://:$ADO_PAT@dev.azure.com/$TARGET_ORG/$TARGET_PROJECT/_git/$RESTORE_REPO" \
-            | grep -v '\^{}' | wc -l | tr -d ' ')
-          ADO_HEAD=$(git ls-remote \
-            "https://:$ADO_PAT@dev.azure.com/$TARGET_ORG/$TARGET_PROJECT/_git/$RESTORE_REPO" \
-            refs/heads/main 2>/dev/null | awk '{print $1}' \
-            || git ls-remote \
-            "https://:$ADO_PAT@dev.azure.com/$TARGET_ORG/$TARGET_PROJECT/_git/$RESTORE_REPO" \
-            | head -1 | awk '{print $1}')
+          # Use a single variable for the remote URL (encoded) to avoid repetition
+          ADO_REMOTE="https://:$ADO_PAT@dev.azure.com/$TARGET_ORG_ENC/$TARGET_PROJECT_ENC/_git/$RESTORE_REPO"
+          ADO_BRANCHES=$(git ls-remote --heads "$ADO_REMOTE" | wc -l | tr -d ' ')
+          ADO_TAGS=$(git ls-remote --tags "$ADO_REMOTE" | grep -v '\^{}' | wc -l | tr -d ' ')
+          ADO_HEAD=$(git ls-remote "$ADO_REMOTE" refs/heads/main 2>/dev/null | awk '{print $1}' \
+            || git ls-remote "$ADO_REMOTE" | head -1 | awk '{print $1}')
 
           echo "GitHub backup  — branches: $GH_BRANCHES, tags: $GH_TAGS, head: ${GH_HEAD:0:10}"
           echo "ADO restore    — branches: $ADO_BRANCHES, tags: $ADO_TAGS, head: ${ADO_HEAD:0:10}"

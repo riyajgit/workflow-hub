@@ -46,9 +46,13 @@ jobs:
           ADO_PROJECT: ${{ github.event.inputs.ado_project }}
           ADO_PAT: ${{ secrets.ADO_PAT }}
         run: |
+          # URL-encode org and project so names with spaces/special chars work in URLs
+          ADO_ORG_ENC=$(python3 -c "import urllib.parse, os; print(urllib.parse.quote(os.environ['ADO_ORG'], safe=''))")
+          ADO_PROJECT_ENC=$(python3 -c "import urllib.parse, os; print(urllib.parse.quote(os.environ['ADO_PROJECT'], safe=''))")
+          echo "Fetching repos for: $ADO_ORG / $ADO_PROJECT"
           HTTP_CODE=$(curl -sS -w "%{http_code}" -o ado-raw.json \
             -u ":$ADO_PAT" \
-            "https://dev.azure.com/$ADO_ORG/$ADO_PROJECT/_apis/git/repositories?api-version=7.1-preview.1")
+            "https://dev.azure.com/$ADO_ORG_ENC/$ADO_PROJECT_ENC/_apis/git/repositories?api-version=7.1-preview.1")
 
           if [ "$HTTP_CODE" != "200" ]; then
             echo "ERROR: Azure DevOps API returned HTTP $HTTP_CODE"

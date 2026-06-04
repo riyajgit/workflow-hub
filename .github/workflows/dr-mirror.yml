@@ -79,9 +79,18 @@ jobs:
           || echo "Repo $BACKUP_REPO already exists, syncing..."
 
       - name: Clone from Azure DevOps (mirror)
+        env:
+          ADO_ORG:     ${{ matrix.repo.ado_org }}
+          ADO_PROJECT: ${{ matrix.repo.ado_project }}
+          ADO_REPO:    ${{ matrix.repo.ado_repo }}
+          ADO_PAT:     ${{ secrets.ADO_PAT }}
         run: |
+          # URL-encode all three components so project names with spaces work
+          ADO_ORG_ENC=$(python3 -c "import urllib.parse, os; print(urllib.parse.quote(os.environ['ADO_ORG'], safe=''))")
+          ADO_PROJECT_ENC=$(python3 -c "import urllib.parse, os; print(urllib.parse.quote(os.environ['ADO_PROJECT'], safe=''))")
+          ADO_REPO_ENC=$(python3 -c "import urllib.parse, os; print(urllib.parse.quote(os.environ['ADO_REPO'], safe=''))")
           git clone --mirror \
-            "https://${{ secrets.ADO_PAT }}@dev.azure.com/${{ matrix.repo.ado_org }}/${{ matrix.repo.ado_project }}/_git/${{ matrix.repo.ado_repo }}" \
+            "https://:$ADO_PAT@dev.azure.com/$ADO_ORG_ENC/$ADO_PROJECT_ENC/_git/$ADO_REPO_ENC" \
             ado-mirror
           echo "Refs cloned:"
           git -C ado-mirror for-each-ref --format='%(refname)' refs/heads refs/tags | head -20
