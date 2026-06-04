@@ -1,0 +1,99 @@
+name: DR - Cache ADO Repo List
+
+# PURPOSE: Fetches the live repo list from Azure DevOps and saves it to
+#          ado-repos-cached.json so the GitHub Pages UI can display it.
+#          Trigger this manually (or from the UI) before making a selection.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ado_org:
+        description: Azure DevOps organization name
+        required: true
+        default: 'binhsps'
+        type: string
+      ado_project:
+        description: Azure DevOps project name
+        required: true
+        default: 'Test1'
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  cache-repos:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate secrets
+        env:
+          ADO_PAT: ${{ secrets.ADO_PAT }}
+        run: |
+          if [ -z "$ADO_PAT" ]; then
+            echo "ERROR: ADO_PAT secret is missing."
+            exit 1
+          fi
+          echo "Secrets OK."
+
+      - name: Fetch repos from Azure DevOps and cache
+        env:
+          ADO_ORG: ${{ github.event.inputs.ado_org }}
+          ADO_PROJECT: ${{ github.event.inputs.ado_project }}
+          ADO_PAT: ${{ secrets.ADO_PAT }}
+        run: |
+          HTTP_CODE=$(curl -sS -w "%{http_code}" -o ado-raw.json \
+            -u ":$ADO_PAT" \
+            "https://dev.azure.com/$ADO_ORG/$ADO_PROJECT/_apis/git/repositories?api-version=7.1-preview.1")
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "ERROR: Azure DevOps API returned HTTP $HTTP_CODE"
+            cat ado-raw.json
+            exit 1
+          fi
+
+          REPO_COUNT=$(jq '.value | length' ado-raw.json)
+          echo "Found $REPO_COUNT repositories in $ADO_ORG/$ADO_PROJECT."
+
+          jq -n \
+            --arg org     "$ADO_ORG" \
+            --arg project "$ADO_PROJECT" \
+            --arg ts      "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+            --arg actor   "${{ github.actor }}" \
+            --argjson repos "$(jq '[.value[].name] | sort | unique' ado-raw.json)" \
+            '{
+              ado_org:     $org,
+              ado_project: $project,
+              fetched_at:  $ts,
+              fetched_by:  $actor,
+              repos:       $repos
+            }' > ado-repos-cached.json
+
+          echo "Cached repos:"
+          jq -r '.repos[]' ado-repos-cached.json | nl -ba
+
+          {
+            echo "## ADO Repo Cache Updated"
+            echo "**Org:** \`$ADO_ORG\` | **Project:** \`$ADO_PROJECT\`"
+            echo "**Fetched at:** $(date -u '+%Y-%m-%d %H:%M UTC')"
+            echo ""
+            echo "**Repos found ($(jq '.repos | length' ado-repos-cached.json)):**"
+            jq -r '.repos[] | "- `" + . + "`"' ado-repos-cached.json
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Commit cached repo list
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add ado-repos-cached.json
+          if git diff --cached --quiet; then
+            echo "No changes to repo cache."
+          else
+            git commit -m "chore(dr): refresh ADO repo cache [${{ github.actor }}]"
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+            echo "ado-repos-cached.json committed and pushed."
+          fi

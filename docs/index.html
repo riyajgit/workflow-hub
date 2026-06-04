@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DR Mirror — Repo Selector</title>
+  <style>
+    :root {
+      --primary:   #0969da;
+      --success:   #1a7f37;
+      --danger:    #cf222e;
+      --bg:        #f6f8fa;
+      --border:    #d0d7de;
+      --text:      #1f2328;
+      --muted:     #656d76;
+      --card:      #ffffff;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+           background: var(--bg); color: var(--text); font-size: 14px; line-height: 1.5; }
+
+    /* ── Header ── */
+    header { background: #24292f; color: #fff; padding: 12px 24px;
+             display: flex; align-items: center; gap: 12px; }
+    header h1 { font-size: 15px; font-weight: 600; }
+    .badge { background: #388bfd22; border: 1px solid #388bfd66; color: #79c0ff;
+             padding: 2px 8px; border-radius: 12px; font-size: 11px; }
+
+    /* ── Layout ── */
+    main { max-width: 960px; margin: 24px auto; padding: 0 20px; display: grid; gap: 16px; }
+
+    /* ── Card ── */
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 6px; }
+    .card-header { padding: 10px 16px; border-bottom: 1px solid var(--border);
+                   font-weight: 600; font-size: 13px;
+                   display: flex; justify-content: space-between; align-items: center; }
+    .card-body { padding: 16px; }
+
+    /* ── Form elements ── */
+    .field { margin-bottom: 12px; }
+    .field:last-child { margin-bottom: 0; }
+    label.lbl { display: block; font-weight: 600; font-size: 12px; margin-bottom: 4px; }
+    input[type="password"], input[type="text"] {
+      width: 100%; padding: 6px 10px; border: 1px solid var(--border);
+      border-radius: 6px; font-size: 13px; background: #fff; }
+    .help { color: var(--muted); font-size: 11px; margin-top: 3px; }
+    .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+
+    /* ── Buttons ── */
+    .btn { padding: 6px 14px; border-radius: 6px; border: 1px solid transparent;
+           cursor: pointer; font-size: 13px; font-weight: 500;
+           display: inline-flex; align-items: center; gap: 6px; }
+    .btn-primary { background: var(--primary); color: #fff; border-color: #0757ba; }
+    .btn-success { background: var(--success); color: #fff; border-color: #156930; }
+    .btn-outline  { background: #fff; color: var(--text); border-color: var(--border); }
+    .btn-sm { padding: 4px 10px; font-size: 12px; }
+    .btn:disabled { opacity: 0.55; cursor: not-allowed; }
+    .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+
+    /* ── Status banners ── */
+    .msg { padding: 8px 12px; border-radius: 6px; font-size: 13px; margin-bottom: 4px; }
+    .msg.info    { background: #ddf4ff; border: 1px solid #54aeff66; color: #0550ae; }
+    .msg.success { background: #dafbe1; border: 1px solid #4ac26b66; color: #116329; }
+    .msg.error   { background: #ffebe9; border: 1px solid #ff818266; color: #82071e; }
+    .msg.warning { background: #fff8c5; border: 1px solid #d4a72c66; color: #7d4e00; }
+
+    /* ── Repo grid ── */
+    .repo-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 8px; }
+    .repo-tile {
+      display: flex; align-items: center; gap: 8px;
+      padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px;
+      cursor: pointer; transition: border-color .12s, background .12s;
+      user-select: none;
+    }
+    .repo-tile:hover { background: #f0f3f6; }
+    .repo-tile.on { border-color: var(--primary); background: #ddf4ff; }
+    .repo-tile input[type="checkbox"] { cursor: pointer; accent-color: var(--primary); }
+    .repo-tile .rname { font-size: 13px; font-weight: 500; overflow: hidden;
+                        text-overflow: ellipsis; white-space: nowrap; }
+
+    /* ── Tags ── */
+    .tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+    .tag { background: #0969da14; border: 1px solid #0969da33; color: var(--primary);
+           padding: 2px 10px; border-radius: 12px; font-size: 12px; }
+
+    /* ── Misc ── */
+    .empty { color: var(--muted); font-style: italic; font-size: 13px; }
+    .meta  { color: var(--muted); font-size: 11px; margin-top: 6px; }
+    .spinner { display: inline-block; width: 13px; height: 13px;
+               border: 2px solid #ccc; border-top-color: var(--primary);
+               border-radius: 50%; animation: spin .7s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    code { background: #f0f3f6; padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+  </style>
+</head>
+<body>
+
+<header>
+  <!-- GitHub mark -->
+  <svg width="20" height="20" viewBox="0 0 20 20" fill="white" aria-hidden="true">
+    <path d="M10 0C4.477 0 0 4.477 0 10c0 4.418 2.865 8.166 6.839 9.489.5.092.682-.217
+    .682-.482 0-.237-.008-.866-.013-1.7-2.782.604-3.369-1.34-3.369-1.34-.454-1.156
+    -1.11-1.463-1.11-1.463-.908-.62.069-.608.069-.608 1.003.07 1.531 1.03 1.531 1.03
+    .892 1.529 2.341 1.087 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.11
+    -4.555-4.943 0-1.091.39-1.984 1.029-2.683-.103-.253-.446-1.27.098-2.647 0 0
+    .84-.269 2.75 1.025A9.578 9.578 0 0110 4.836a9.59 9.59 0 012.504.337c1.909-1.294
+    2.747-1.025 2.747-1.025.546 1.377.203 2.394.1 2.647.64.699 1.028 1.592 1.028 2.683
+    0 3.842-2.339 4.687-4.566 4.935.359.309.678.919.678 1.852 0 1.336-.012 2.415-.012
+    2.741 0 .267.18.578.688.48C17.137 18.163 20 14.418 20 10 20 4.477 15.523 0 10 0z"/>
+  </svg>
+  <h1>DR Mirror — Repo Selector</h1>
+  <span class="badge">Enterprise DR Tool</span>
+</header>
+
+<main>
+  <div id="globalMsg"></div>
+
+  <!-- ── 1. Authentication ── -->
+  <div class="card">
+    <div class="card-header">1 — Connect</div>
+    <div class="card-body">
+      <div class="grid2">
+        <div class="field">
+          <label class="lbl" for="pat">GitHub Personal Access Token</label>
+          <input type="password" id="pat" placeholder="ghp_xxxxxxxxxxxxxxxxxxxx" autocomplete="off">
+          <p class="help">Needs <code>repo</code> + <code>workflow</code> scopes.
+             Stored in session only — cleared when you close this tab.</p>
+        </div>
+        <div class="field">
+          <label class="lbl" for="ghRepo">GitHub Repository</label>
+          <input type="text" id="ghRepo" placeholder="owner/workflow-hub">
+          <p class="help">The repo that hosts this workflow-hub (e.g. <code>riyajgit/workflow-hub</code>).</p>
+        </div>
+      </div>
+      <div class="actions">
+        <button class="btn btn-primary" onclick="connect()">Connect &amp; Load</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── 2. Available repos ── -->
+  <div class="card">
+    <div class="card-header">
+      <span>2 — Available Azure DevOps Repositories</span>
+      <button class="btn btn-outline btn-sm" id="btnRefresh" onclick="triggerRefresh()" disabled>
+        ↻ Refresh from ADO
+      </button>
+    </div>
+    <div class="card-body">
+      <div id="repoArea"><p class="empty">Connect above to load available repositories.</p></div>
+      <p class="meta" id="cacheMeta"></p>
+    </div>
+  </div>
+
+  <!-- ── 3. Save selection ── -->
+  <div class="card">
+    <div class="card-header">3 — Save Selection for Daily Mirror</div>
+    <div class="card-body">
+      <p style="font-size:13px;margin-bottom:6px;">
+        Checked repos will be written to <code>repos.json</code> and mirrored nightly.
+      </p>
+      <div id="selTags"><p class="empty">No repos selected.</p></div>
+      <div class="actions">
+        <button class="btn btn-success" id="btnSave" onclick="saveSelection()" disabled>
+          ✓ Save &amp; Enable for Daily Mirror
+        </button>
+        <button class="btn btn-outline" onclick="clearAll()">Clear All</button>
+      </div>
+    </div>
+  </div>
+</main>
+
+<script>
+'use strict';
+
+// ── State ──────────────────────────────────────────────────────────────────
+const S = { repos: [], selected: new Set(), adoOrg: '', adoProject: '' };
+
+// ── DOM helpers ────────────────────────────────────────────────────────────
+const $  = id => document.getElementById(id);
+const pat    = () => $('pat').value.trim();
+const ghRepo = () => $('ghRepo').value.trim();
+
+function showMsg(html, type = 'info', target = 'globalMsg') {
+  $(target).innerHTML = `<div class="msg ${type}">${html}</div>`;
+}
+function clearMsg(target = 'globalMsg') { $(target).innerHTML = ''; }
+
+function apiHeaders() {
+  return {
+    'Authorization': `Bearer ${pat()}`,
+    'Accept': 'application/vnd.github+json',
+    'X-GitHub-Api-Version': '2022-11-28'
+  };
+}
+
+async function ghGet(path) {
+  const res = await fetch(`https://api.github.com/repos/${ghRepo()}${path}`,
+                          { headers: apiHeaders() });
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`GitHub API ${res.status} on ${path}: ${body}`);
+  }
+  return res.json();
+}
+
+function decodeFile(b64) {
+  return JSON.parse(atob(b64.replace(/\s/g, '')));
+}
+
+// ── Connect & load ─────────────────────────────────────────────────────────
+async function connect() {
+  if (!pat())    { showMsg('Enter your GitHub PAT.', 'error'); return; }
+  if (!ghRepo()) { showMsg('Enter the GitHub repository (owner/name).', 'error'); return; }
+
+  showMsg('<span class="spinner"></span>&nbsp;Connecting…');
+  try {
+    await Promise.all([loadAdoCache(), loadCurrentSelection()]);
+    $('btnRefresh').disabled = false;
+    $('btnSave').disabled    = false;
+    clearMsg();
+  } catch (e) {
+    showMsg(`Connection failed: ${e.message}`, 'error');
+  }
+}
+
+async function loadAdoCache() {
+  let data;
+  try {
+    const f = await ghGet('/contents/ado-repos-cached.json');
+    data = decodeFile(f.content);
+  } catch (_) {
+    $('repoArea').innerHTML =
+      `<div class="msg warning">
+         <strong>ado-repos-cached.json not found.</strong><br>
+         Click <strong>↻ Refresh from ADO</strong> to fetch the live repo list from Azure DevOps.
+       </div>`;
+    return;
+  }
+  S.repos      = data.repos || [];
+  S.adoOrg     = data.ado_org || '';
+  S.adoProject = data.ado_project || '';
+  $('cacheMeta').textContent =
+    `Last refreshed: ${data.fetched_at || 'unknown'} by ${data.fetched_by || '—'} ` +
+    `| Org: ${S.adoOrg} / Project: ${S.adoProject}`;
+  renderRepos();
+}
+
+async function loadCurrentSelection() {
+  try {
+    const f = await ghGet('/contents/repos.json');
+    const current = decodeFile(f.content);
+    current.filter(r => r.enabled !== false).forEach(r => S.selected.add(r.ado_repo));
+  } catch (_) { /* repos.json may not exist yet */ }
+}
+
+// ── Render repo tiles ──────────────────────────────────────────────────────
+function renderRepos() {
+  if (!S.repos.length) {
+    $('repoArea').innerHTML = '<p class="empty">No repos found in cache.</p>';
+    return;
+  }
+  $('repoArea').innerHTML =
+    `<div class="repo-grid">` +
+    S.repos.map(name => {
+      const on  = S.selected.has(name);
+      const esc = name.replace(/'/g, "\\'");
+      return `
+        <label class="repo-tile${on ? ' on' : ''}" id="tile-${CSS.escape(name)}">
+          <input type="checkbox" ${on ? 'checked' : ''}
+                 onchange="toggle('${esc}', this.checked)">
+          <span class="rname" title="${name}">${name}</span>
+        </label>`;
+    }).join('') +
+    `</div>`;
+  renderTags();
+}
+
+function renderTags() {
+  $('selTags').innerHTML = S.selected.size
+    ? `<div class="tags">${[...S.selected].map(n => `<span class="tag">${n}</span>`).join('')}</div>`
+    : '<p class="empty">No repos selected.</p>';
+}
+
+function toggle(name, checked) {
+  checked ? S.selected.add(name) : S.selected.delete(name);
+  const tile = $('tile-' + CSS.escape(name));
+  if (tile) tile.classList.toggle('on', checked);
+  renderTags();
+}
+
+function clearAll() {
+  S.selected.clear();
+  document.querySelectorAll('.repo-tile').forEach(t => t.classList.remove('on'));
+  document.querySelectorAll('.repo-tile input').forEach(cb => { cb.checked = false; });
+  renderTags();
+}
+
+// ── Refresh ADO list ───────────────────────────────────────────────────────
+async function triggerRefresh() {
+  if (!pat() || !ghRepo()) { showMsg('Connect first.', 'error'); return; }
+
+  const org     = S.adoOrg     || prompt('Azure DevOps organization:', 'binhsps');
+  const project = S.adoProject || prompt('Azure DevOps project:', 'Test1');
+  if (!org || !project) return;
+
+  showMsg('<span class="spinner"></span>&nbsp;Triggering ADO repo refresh workflow…');
+  try {
+    const res = await fetch(
+      `https://api.github.com/repos/${ghRepo()}/actions/workflows/dr-list-repos.yml/dispatches`,
+      {
+        method: 'POST',
+        headers: { ...apiHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ref: 'main', inputs: { ado_org: org, ado_project: project } })
+      }
+    );
+    if (res.status === 204) {
+      showMsg(
+        'Refresh workflow triggered ✓<br>' +
+        'Wait ~30 seconds for it to complete, then click <strong>Connect &amp; Load</strong> again.',
+        'success'
+      );
+    } else {
+      throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+    }
+  } catch (e) {
+    showMsg(`Failed to trigger refresh: ${e.message}`, 'error');
+  }
+}
+
+// ── Save selection ─────────────────────────────────────────────────────────
+async function saveSelection() {
+  if (!S.selected.size)    { showMsg('Select at least one repo.', 'error'); return; }
+  if (!pat() || !ghRepo()) { showMsg('Connect first.', 'error'); return; }
+
+  const org     = S.adoOrg     || prompt('Azure DevOps organization:', 'binhsps');
+  const project = S.adoProject || prompt('Azure DevOps project:', 'Test1');
+  if (!org || !project) return;
+
+  const repoList = [...S.selected].join(',');
+  showMsg('<span class="spinner"></span>&nbsp;Triggering dr-select-repos workflow…');
+  try {
+    const res = await fetch(
+      `https://api.github.com/repos/${ghRepo()}/actions/workflows/dr-select-repos.yml/dispatches`,
+      {
+        method: 'POST',
+        headers: { ...apiHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ref: 'main',
+          inputs: { ado_org: org, ado_project: project, repos_to_mirror: repoList }
+        })
+      }
+    );
+    if (res.status === 204) {
+      showMsg(
+        `Selection saved ✓ — <strong>${repoList}</strong><br>` +
+        `The <em>dr-select-repos</em> workflow is now running and will update <code>repos.json</code>. ` +
+        `Daily mirroring will pick up the new selection at the next scheduled run.`,
+        'success'
+      );
+    } else {
+      throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+    }
+  } catch (e) {
+    showMsg(`Failed to save selection: ${e.message}`, 'error');
+  }
+}
+
+// ── Restore inputs from sessionStorage ────────────────────────────────────
+window.addEventListener('DOMContentLoaded', () => {
+  const saved = sessionStorage.getItem('dr_gh_repo');
+  if (saved) $('ghRepo').value = saved;
+  $('ghRepo').addEventListener('input', e =>
+    sessionStorage.setItem('dr_gh_repo', e.target.value));
+  // PAT is intentionally NOT persisted
+});
+</script>
+</body>
+</html>
