@@ -85,15 +85,19 @@ jobs:
             jq -r '.repos[] | "- `" + . + "`"' ado-repos-cached.json
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Commit cached repo list
+      - name: Publish cache and commit
         run: |
+          # Copy to docs/ so GitHub Pages serves it without auth
+          mkdir -p docs
+          cp ado-repos-cached.json docs/ado-repos-cached.json
+
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add ado-repos-cached.json
+          git add ado-repos-cached.json docs/ado-repos-cached.json
           if git diff --cached --quiet; then
             echo "No changes to repo cache."
           else
             git commit -m "chore(dr): refresh ADO repo cache [${{ github.actor }}]"
             git push origin "HEAD:${GITHUB_REF_NAME}"
-            echo "ado-repos-cached.json committed and pushed."
+            echo "ado-repos-cached.json updated (root + docs/)."
           fi

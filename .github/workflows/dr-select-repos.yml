@@ -134,15 +134,19 @@ jobs:
           echo "repos.json updated:"
           jq -r '.[] | "  \(.ado_repo): enabled=\(.enabled)"' repos.json
 
-          if git diff --quiet -- repos.json; then
+          # Also publish to docs/ so GitHub Pages serves it without auth
+          mkdir -p docs
+          cp repos.json docs/repos.json
+
+          if git diff --quiet -- repos.json docs/repos.json; then
             echo "No change in selection — nothing to commit."
           else
             git config user.name  "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add repos.json
+            git add repos.json docs/repos.json
             git commit -m "chore(dr): update mirror selection [${{ github.actor }}]"
             git push origin "HEAD:${GITHUB_REF_NAME}"
-            echo "repos.json committed and pushed."
+            echo "repos.json committed and pushed (root + docs/)."
           fi
 
       - name: Summarise current selection
