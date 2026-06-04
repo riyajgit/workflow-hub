@@ -1,20 +1,8 @@
 {
   "$schema": "https://json.schemastore.org/staticwebapp.config.json",
 
-  "auth": {
-    "identityProviders": {
-      "azureActiveDirectory": {
-        "registration": {
-          "openIdIssuer": "https://login.microsoftonline.com/YOUR_TENANT_ID/v2.0",
-          "clientIdSettingName": "AAD_CLIENT_ID",
-          "clientSecretSettingName": "AAD_CLIENT_SECRET"
-        },
-        "login": {
-          "loginParameters": ["domain_hint=YOUR_DOMAIN"]
-        }
-      }
-    }
-  },
+  "NOTE_phase1": "Phase 1 — Built-in Microsoft login, no app registration needed. Any Microsoft account can log in.",
+  "NOTE_phase2": "Phase 2 — Uncomment the 'auth' block below and fill YOUR_TENANT_ID + AAD_CLIENT_ID/SECRET to restrict to your org tenant only.",
 
   "routes": [
     {
@@ -22,8 +10,8 @@
       "allowedRoles": ["anonymous", "authenticated"]
     },
     {
-      "route": "/api/*",
-      "allowedRoles": ["authenticated"]
+      "route": "/unauthorized.html",
+      "allowedRoles": ["anonymous", "authenticated"]
     },
     {
       "route": "/*",
@@ -52,5 +40,21 @@
 
   "mimeTypes": {
     ".json": "application/json"
+  },
+
+  "NOTE_phase2_instructions": "Once AAD app registration is ready, add the block below (rename key to 'auth') and set AAD_CLIENT_ID + AAD_CLIENT_SECRET in Azure SWA > Configuration > Application settings",
+  "auth_PHASE2_DISABLED": {
+    "identityProviders": {
+      "azureActiveDirectory": {
+        "registration": {
+          "openIdIssuer": "https://login.microsoftonline.com/YOUR_TENANT_ID/v2.0",
+          "clientIdSettingName": "AAD_CLIENT_ID",
+          "clientSecretSettingName": "AAD_CLIENT_SECRET"
+        },
+        "login": {
+          "loginParameters": ["domain_hint=YOUR_ORG_DOMAIN"]
+        }
+      }
+    }
   }
 }
