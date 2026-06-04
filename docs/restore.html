@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DR WorkflowHub — Restore Drill</title>
+  <link rel="stylesheet" href="shared.css">
+  <style>
+    .restore-warn {
+      background: #fff8c5;
+      border: 1px solid #d4a72c66;
+      border-radius: 8px;
+      padding: 14px 18px;
+      display: flex;
+      gap: 12px;
+      align-items: flex-start;
+      font-size: 13px;
+      color: #7d4e00;
+    }
+    .restore-warn .warn-icon { font-size: 22px; flex-shrink: 0; }
+    .restore-warn ul { margin: 6px 0 0 16px; line-height: 1.8; }
+    .restore-form .field label.lbl { font-size: 12px; }
+    .section-title {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text);
+      margin-bottom: 10px;
+      padding-bottom: 6px;
+      border-bottom: 1px solid var(--border);
+    }
+  </style>
+</head>
+<body>
+
+<nav>
+  <a class="nav-brand" href="index.html">
+    <svg width="20" height="20" viewBox="0 0 20 20" fill="white">
+      <path d="M10 0C4.477 0 0 4.477 0 10c0 4.418 2.865 8.166 6.839 9.489.5.092.682-.217.682-.482 0-.237-.008-.866-.013-1.7-2.782.604-3.369-1.34-3.369-1.34-.454-1.156-1.11-1.463-1.11-1.463-.908-.62.069-.608.069-.608 1.003.07 1.531 1.03 1.531 1.03.892 1.529 2.341 1.087 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.11-4.555-4.943 0-1.091.39-1.984 1.029-2.683-.103-.253-.446-1.27.098-2.647 0 0 .84-.269 2.75 1.025A9.578 9.578 0 0110 4.836a9.59 9.59 0 012.504.337c1.909-1.294 2.747-1.025 2.747-1.025.546 1.377.203 2.394.1 2.647.64.699 1.028 1.592 1.028 2.683 0 3.842-2.339 4.687-4.566 4.935.359.309.678.919.678 1.852 0 1.336-.012 2.415-.012 2.741 0 .267.18.578.688.48C17.137 18.163 20 14.418 20 10 20 4.477 15.523 0 10 0z"/>
+    </svg>
+    DR WorkflowHub
+  </a>
+  <div class="nav-links">
+    <a class="nav-link" href="index.html">&#127968; Home</a>
+    <a class="nav-link" href="repos.html">&#128193; Repositories</a>
+    <a class="nav-link" href="reporting.html">&#128202; Reporting</a>
+    <a class="nav-link active" href="restore.html">&#128257; Restore</a>
+  </div>
+  <span class="nav-badge">Enterprise DR Tool</span>
+</nav>
+
+<main>
+  <div>
+    <div class="page-title">&#128257; DR Restore Drill</div>
+    <div class="page-subtitle">Trigger a mock restoration from GitHub mirrors back to Azure DevOps.</div>
+  </div>
+
+  <div id="globalMsg"></div>
+
+  <!-- Safety notice -->
+  <div class="restore-warn">
+    <div class="warn-icon">&#9888;</div>
+    <div>
+      <strong>Safe by design &mdash; read before running</strong>
+      <ul>
+        <li>Restores into a <strong>new, isolated ADO project</strong> (recommended: a dedicated DR-Test project).</li>
+        <li><strong>Refuses to run</strong> if the target repo already exists in ADO.</li>
+        <li>Does <strong>not touch</strong> original ADO source repos.</li>
+        <li>Restored repos are named with the suffix you specify (e.g. <code>selfhost_dr_restore</code>).</li>
+        <li>After reviewing, <strong>manually delete</strong> the restored repos from ADO.</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- How it works -->
+  <div class="card">
+    <div class="card-header">How the Restore Drill Works</div>
+    <div class="card-body">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px">
+        <div>
+          <p class="section-intro">
+            The <code>dr-restore-drill.yml</code> workflow clones the GitHub mirror copies of your selected repos
+            and pushes them into a fresh ADO project. It then verifies commit parity between the GitHub mirror
+            and the restored ADO repo, and reports the results in the workflow run summary.
+          </p>
+          <ol style="font-size:13px;color:var(--muted);line-height:2;padding-left:18px">
+            <li>Workflow reads your selected repos from GitHub mirrors</li>
+            <li>Creates new repos in the target ADO project</li>
+            <li>Pushes all branches and tags</li>
+            <li>Verifies commit count parity</li>
+            <li>Reports per-repo pass/fail in the run summary</li>
+          </ol>
+        </div>
+        <div style="font-size:12px;color:var(--muted);line-height:1.9">
+          <strong style="color:var(--text);display:block;margin-bottom:6px">Tips for a successful drill</strong>
+          &bull; Use a separate ADO project (e.g. <code>Test1-DR</code>) as target<br>
+          &bull; Run quarterly or after any major repo restructuring<br>
+          &bull; Check the GitHub Actions run summary for parity results<br>
+          &bull; Delete restored repos from ADO when done<br>
+          <br>
+          <strong style="color:var(--text);display:block;margin-bottom:6px">View previous drill runs</strong>
+          <a id="drillRunsLink" href="#" target="_blank" rel="noopener" class="btn btn-outline btn-sm" style="margin-top:2px">
+            &#128279; Open Restore Drill Runs
+          </a>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Restore Form -->
+  <div class="card">
+    <div class="card-header">&#9654; Trigger Restore Drill</div>
+    <div class="card-body restore-form">
+
+      <p class="section-title">1. Repos to Restore</p>
+      <div class="field">
+        <label class="lbl" for="reposToRestore">Repositories (comma-separated ADO repo names)</label>
+        <input type="text" id="reposToRestore" placeholder="e.g. selfhost,hostedagent,mirrortest">
+        <p class="help">Use exact names as they appear in ADO. These must already be mirrored on GitHub.</p>
+      </div>
+      <div id="repoQuickPick" style="margin-top:6px"></div>
+
+      <hr class="divider">
+      <p class="section-title">2. Restore Target</p>
+      <div class="grid2">
+        <div class="field">
+          <label class="lbl" for="targetOrg">Target ADO Organization</label>
+          <input type="text" id="targetOrg" placeholder="e.g. binhsps">
+          <p class="help">The ADO org to restore into (can be same or different org).</p>
+        </div>
+        <div class="field">
+          <label class="lbl" for="targetProject">Target ADO Project</label>
+          <input type="text" id="targetProject" placeholder="e.g. Test1-DR" value="Test1-DR">
+          <p class="help">Use a <strong>dedicated DR-Test project</strong> to stay fully isolated from production.</p>
+        </div>
+      </div>
+      <div class="field">
+        <label class="lbl" for="restoreSuffix">Repo Name Suffix</label>
+        <input type="text" id="restoreSuffix" placeholder="_dr_restore" value="_dr_restore" style="max-width:260px">
+        <p class="help">Appended to each restored repo name. E.g. <code>selfhost</code> &rarr; <code>selfhost_dr_restore</code></p>
+      </div>
+
+      <hr class="divider">
+      <p class="section-title">3. GitHub Access</p>
+      <div class="grid2">
+        <div class="field">
+          <label class="lbl" for="ghRepo">GitHub Repository (owner/name)</label>
+          <input type="text" id="ghRepo" placeholder="riyajgit/workflow-hub" oninput="saveConfig();updateLinks()">
+          <p class="help">The workflow-hub that hosts <code>dr-restore-drill.yml</code>.</p>
+        </div>
+        <div class="field">
+          <label class="lbl" for="pat">&#128273; GitHub PAT &mdash; <span style="font-weight:400;color:var(--muted)">needs <code>repo</code> + <code>workflow</code> scopes</span></label>
+          <input type="password" id="pat" placeholder="ghp_xxxxxxxxxxxxxxxxxxxx" autocomplete="off" oninput="onPatInput()">
+          <p class="pat-status none" id="patStatus" style="font-size:12px;margin-top:3px"></p>
+          <p class="help"><a href="https://github.com/settings/tokens" target="_blank" rel="noopener">github.com/settings/tokens</a> &mdash; token is only sent to GitHub API over HTTPS.</p>
+        </div>
+      </div>
+
+      <hr class="divider">
+      <div class="actions">
+        <button class="btn btn-danger btn-lg" id="btnRun" onclick="runDrill()">&#128257; Run Restore Drill</button>
+        <button class="btn btn-outline" onclick="clearForm()">Reset Form</button>
+      </div>
+      <p style="font-size:11px;color:var(--muted);margin-top:8px">
+        This triggers the <code>dr-restore-drill.yml</code> GitHub Actions workflow via the GitHub API.
+        Monitor progress in the <a id="runsLinkInline" href="#" target="_blank" rel="noopener">Actions tab</a>.
+      </p>
+    </div>
+  </div>
+
+</main>
+
+<script>
+'use strict';
+const $ = id => document.getElementById(id);
+const ghRepo = () => $('ghRepo').value.trim();
+const pat    = () => $('pat').value.trim();
+
+function showMsg(html, type = 'info') { $('globalMsg').innerHTML = `<div class="msg ${type}">${html}</div>`; }
+function clearMsg() { $('globalMsg').innerHTML = ''; }
+function apiHeaders() {
+  return {
+    'Authorization': `Bearer ${pat()}`,
+    'Accept': 'application/vnd.github+json',
+    'X-GitHub-Api-Version': '2022-11-28'
+  };
+}
+
+window.addEventListener('DOMContentLoaded', async () => {
+  $('ghRepo').value  = localStorage.getItem('dr_gh_repo') || '';
+  $('targetOrg').value = localStorage.getItem('dr_ado_org') || '';
+  const saved = localStorage.getItem('dr_gh_pat');
+  if (saved) $('pat').value = saved;
+  updatePatStatus();
+  updateLinks();
+  await loadRepoQuickPick();
+});
+
+function saveConfig()  { localStorage.setItem('dr_gh_repo', $('ghRepo').value.trim()); updateLinks(); }
+
+function updateLinks() {
+  const gh = ghRepo();
+  const base = gh ? `https://github.com/${gh}/actions/workflows/dr-restore-drill.yml` : '#';
+  $('drillRunsLink').href   = base;
+  $('runsLinkInline').href  = base;
+  [$('drillRunsLink'), $('runsLinkInline')].forEach(el => el.style.opacity = gh ? '1' : '.5');
+}
+
+async function loadRepoQuickPick() {
+  try {
+    const res = await fetch('./repos.json');
+    if (!res.ok) return;
+    const repos = await res.json();
+    const enabled = repos.filter(r => r.enabled !== false);
+    if (!enabled.length) return;
+    const qp = $('repoQuickPick');
+    qp.innerHTML = '<p style="font-size:11px;color:var(--muted);margin-bottom:6px">Quick-pick from currently mirrored repos:</p>' +
+      '<div class="tags">' +
+      enabled.map(r =>
+        `<span class="tag" style="cursor:pointer" onclick="toggleRepoPick('${r.ado_repo}')" id="qp-${CSS.escape(r.ado_repo)}">${r.ado_repo}</span>`
+      ).join('') + '</div>';
+  } catch (_) {}
+}
+
+const _picked = new Set();
+function toggleRepoPick(name) {
+  _picked.has(name) ? _picked.delete(name) : _picked.add(name);
+  $('reposToRestore').value = [..._picked].join(',');
+  const el = $('qp-' + CSS.escape(name));
+  if (el) el.style.background = _picked.has(name) ? '#1a7f3714' : '';
+}
+
+function onPatInput() {
+  const val = $('pat').value.trim();
+  if (val) { localStorage.setItem('dr_gh_pat', val); updatePatStatus(); }
+}
+
+function updatePatStatus() {
+  const el = $('patStatus');
+  if (pat()) { el.textContent = '✓ PAT saved in localStorage.'; el.className = 'pat-status ok'; }
+  else { el.textContent = 'No PAT saved.'; el.className = 'pat-status none'; }
+}
+
+async function runDrill() {
+  const repos   = $('reposToRestore').value.trim();
+  const org     = $('targetOrg').value.trim();
+  const project = $('targetProject').value.trim();
+  const suffix  = $('restoreSuffix').value.trim() || '_dr_restore';
+
+  if (!repos)   { showMsg('Enter at least one repository name to restore.', 'error'); return; }
+  if (!org)     { showMsg('Enter a target ADO Organization.', 'error'); return; }
+  if (!project) { showMsg('Enter a target ADO Project.', 'error'); return; }
+  if (!ghRepo()) { showMsg('Set the GitHub Repository (owner/name) in the GitHub Access section.', 'error'); return; }
+  if (!pat())   { showMsg('Enter your GitHub PAT in the GitHub Access section.', 'error'); $('pat').focus(); return; }
+
+  const confirmed = window.confirm(
+    `This will trigger a restore drill:\n\nRepos: ${repos}\nTarget: ${org} / ${project}\nSuffix: ${suffix}\n\nProceed?`
+  );
+  if (!confirmed) return;
+
+  showMsg('<span class="spinner"></span>&nbsp;Triggering restore drill workflow&hellip;');
+  try {
+    const res = await fetch(`https://api.github.com/repos/${ghRepo()}/actions/workflows/dr-restore-drill.yml/dispatches`,
+      { method: 'POST', headers: { ...apiHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ref: 'main', inputs: {
+          repos_to_restore: repos,
+          target_ado_org:   org,
+          target_ado_project: project,
+          restore_suffix:   suffix
+        }}) });
+    if (res.status === 204) {
+      showMsg(`Restore drill triggered &#10003;<br>
+        Restoring <strong>${repos}</strong> into <strong>${org}/${project}</strong> with suffix <code>${suffix}</code>.<br>
+        <a href="${ghRepo() ? `https://github.com/${ghRepo()}/actions/workflows/dr-restore-drill.yml` : '#'}" target="_blank" rel="noopener">
+          &#128279; Monitor the workflow run on GitHub
+        </a>`, 'success');
+    } else throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+  } catch (e) { showMsg(`Drill failed to trigger: ${e.message}`, 'error'); }
+}
+
+function clearForm() {
+  $('reposToRestore').value = '';
+  $('targetProject').value  = 'Test1-DR';
+  $('restoreSuffix').value  = '_dr_restore';
+  _picked.clear();
+  document.querySelectorAll('#repoQuickPick .tag').forEach(el => el.style.background = '');
+  clearMsg();
+}
+</script>
+</body>
+</html>

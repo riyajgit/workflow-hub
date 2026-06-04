@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DR WorkflowHub — Mirror Reporting</title>
+  <link rel="stylesheet" href="shared.css">
+</head>
+<body>
+
+<nav>
+  <a class="nav-brand" href="index.html">
+    <svg width="20" height="20" viewBox="0 0 20 20" fill="white">
+      <path d="M10 0C4.477 0 0 4.477 0 10c0 4.418 2.865 8.166 6.839 9.489.5.092.682-.217.682-.482 0-.237-.008-.866-.013-1.7-2.782.604-3.369-1.34-3.369-1.34-.454-1.156-1.11-1.463-1.11-1.463-.908-.62.069-.608.069-.608 1.003.07 1.531 1.03 1.531 1.03.892 1.529 2.341 1.087 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.11-4.555-4.943 0-1.091.39-1.984 1.029-2.683-.103-.253-.446-1.27.098-2.647 0 0 .84-.269 2.75 1.025A9.578 9.578 0 0110 4.836a9.59 9.59 0 012.504.337c1.909-1.294 2.747-1.025 2.747-1.025.546 1.377.203 2.394.1 2.647.64.699 1.028 1.592 1.028 2.683 0 3.842-2.339 4.687-4.566 4.935.359.309.678.919.678 1.852 0 1.336-.012 2.415-.012 2.741 0 .267.18.578.688.48C17.137 18.163 20 14.418 20 10 20 4.477 15.523 0 10 0z"/>
+    </svg>
+    DR WorkflowHub
+  </a>
+  <div class="nav-links">
+    <a class="nav-link" href="index.html">&#127968; Home</a>
+    <a class="nav-link" href="repos.html">&#128193; Repositories</a>
+    <a class="nav-link active" href="reporting.html">&#128202; Reporting</a>
+    <a class="nav-link" href="restore.html">&#128257; Restore</a>
+  </div>
+  <span class="nav-badge">Enterprise DR Tool</span>
+</nav>
+
+<main>
+  <div>
+    <div class="page-title">&#128202; Mirror Reporting</div>
+    <div class="page-subtitle">Current mirror configuration, repo sync status, and links to GitHub Actions run history.</div>
+  </div>
+
+  <!-- Summary Stats -->
+  <div id="statsRow" class="stat-grid"></div>
+
+  <!-- Mirror configuration metadata -->
+  <div class="card">
+    <div class="card-header">
+      <span>Mirror Configuration</span>
+      <span id="lastCacheTime" style="font-size:12px;color:var(--muted)"></span>
+    </div>
+    <div class="card-body">
+      <div id="configMeta"><p class="empty"><span class="spinner"></span>&nbsp;Loading&hellip;</p></div>
+    </div>
+  </div>
+
+  <!-- Mirrored Repos Table -->
+  <div class="card">
+    <div class="card-header">
+      <span>Mirrored Repositories (repos.json)</span>
+      <div style="display:flex;gap:8px;align-items:center">
+        <input type="text" id="filterInput" placeholder="Filter repos&hellip;" style="width:180px;padding:4px 8px;font-size:12px" oninput="filterTable()">
+        <a id="ghRunsLink" href="#" target="_blank" rel="noopener" class="btn btn-outline btn-sm">&#128279; View Workflow Runs</a>
+      </div>
+    </div>
+    <div class="card-body" style="padding:0">
+      <div id="tableArea"><p class="empty" style="padding:16px"><span class="spinner"></span>&nbsp;Loading repos.json&hellip;</p></div>
+    </div>
+  </div>
+
+  <!-- ADO Discovered Repos -->
+  <div class="card">
+    <div class="card-header">
+      <span>All Discovered ADO Repositories (ado-repos-cached.json)</span>
+      <span id="adoCacheInfo" style="font-size:12px;color:var(--muted)"></span>
+    </div>
+    <div class="card-body" style="padding:0">
+      <div id="adoTableArea"><p class="empty" style="padding:16px"><span class="spinner"></span>&nbsp;Loading cache&hellip;</p></div>
+    </div>
+  </div>
+
+  <!-- PAT for workflow runs -->
+  <div class="card">
+    <div class="card-header">&#128273; GitHub Access (for workflow run links)</div>
+    <div class="card-body">
+      <div class="grid2">
+        <div class="field" style="margin-bottom:0">
+          <label class="lbl" for="ghRepo">GitHub Repository (owner/name)</label>
+          <input type="text" id="ghRepo" placeholder="riyajgit/workflow-hub" oninput="saveConfig();updateRunsLink()">
+          <p class="help">Used to build links to GitHub Actions run history.</p>
+        </div>
+        <div style="font-size:12px;color:var(--muted);padding-top:18px;line-height:1.7">
+          Set once on the <a href="index.html">Home</a> page and it will be remembered here automatically.
+        </div>
+      </div>
+    </div>
+  </div>
+
+</main>
+
+<script>
+'use strict';
+const $ = id => document.getElementById(id);
+
+let allRepos = [];
+let adoData  = {};
+
+window.addEventListener('DOMContentLoaded', async () => {
+  const gh = localStorage.getItem('dr_gh_repo') || '';
+  $('ghRepo').value = gh;
+  updateRunsLink();
+  await Promise.all([loadReposJson(), loadAdoCache()]);
+});
+
+function saveConfig()    { localStorage.setItem('dr_gh_repo', $('ghRepo').value.trim()); updateRunsLink(); }
+function updateRunsLink() {
+  const gh = $('ghRepo').value.trim();
+  const link = $('ghRunsLink');
+  if (gh) {
+    link.href = `https://github.com/${gh}/actions/workflows/dr-mirror.yml`;
+    link.style.opacity = '1';
+  } else {
+    link.href = '#';
+    link.style.opacity = '.5';
+  }
+}
+
+async function loadReposJson() {
+  try {
+    const res = await fetch('./repos.json');
+    if (!res.ok) throw new Error(res.status);
+    allRepos = await res.json();
+    renderStats();
+    renderTable(allRepos);
+  } catch (_) {
+    $('tableArea').innerHTML = '<div class="msg warning" style="margin:16px"><strong>repos.json not found.</strong> Go to the <a href="repos.html">Repositories</a> page to configure mirroring.</div>';
+    renderStats();
+  }
+}
+
+async function loadAdoCache() {
+  try {
+    const res = await fetch('./ado-repos-cached.json');
+    if (!res.ok) throw new Error(res.status);
+    adoData = await res.json();
+    $('lastCacheTime').textContent = adoData.fetched_at ? `Cache: ${adoData.fetched_at}` : '';
+    $('adoCacheInfo').textContent  = adoData.fetched_at
+      ? `${adoData.repos ? adoData.repos.length : 0} repos | Last fetched ${adoData.fetched_at} by ${adoData.fetched_by || '—'}`
+      : '';
+    renderConfigMeta();
+    renderAdoTable();
+  } catch (_) {
+    $('configMeta').innerHTML   = '<div class="msg warning">ado-repos-cached.json not found. Click <strong>Refresh from ADO</strong> on the <a href="repos.html">Repositories</a> page.</div>';
+    $('adoTableArea').innerHTML = '<p class="empty" style="padding:16px">No ADO cache available.</p>';
+  }
+}
+
+function renderConfigMeta() {
+  $('configMeta').innerHTML = `
+    <div class="grid3" style="gap:16px">
+      <div>
+        <div style="font-size:11px;color:var(--muted);font-weight:600;margin-bottom:2px">ADO ORGANIZATION</div>
+        <code>${adoData.ado_org || '—'}</code>
+      </div>
+      <div>
+        <div style="font-size:11px;color:var(--muted);font-weight:600;margin-bottom:2px">ADO PROJECT</div>
+        <code>${adoData.ado_project || '—'}</code>
+      </div>
+      <div>
+        <div style="font-size:11px;color:var(--muted);font-weight:600;margin-bottom:2px">LAST REFRESHED BY</div>
+        <code>${adoData.fetched_by || '—'}</code>
+      </div>
+    </div>`;
+}
+
+function renderStats() {
+  const total   = allRepos.length;
+  const enabled = allRepos.filter(r => r.enabled !== false).length;
+  const disabled = total - enabled;
+  const orgs    = new Set(allRepos.map(r => r.ado_org)).size;
+  const projs   = new Set(allRepos.map(r => r.ado_project)).size;
+  $('statsRow').innerHTML = [
+    { num: total,    label: 'Total Repos' },
+    { num: enabled,  label: 'Enabled (mirrored)' },
+    { num: disabled, label: 'Disabled' },
+    { num: orgs,     label: 'ADO Orgs' },
+    { num: projs,    label: 'ADO Projects' },
+  ].map(s => `
+    <div class="stat-card">
+      <div class="stat-num">${s.num}</div>
+      <div class="stat-label">${s.label}</div>
+    </div>`).join('');
+}
+
+function renderTable(repos) {
+  if (!repos.length) {
+    $('tableArea').innerHTML = '<p class="empty" style="padding:16px">No repos configured. Go to <a href="repos.html">Repositories</a> to add some.</p>';
+    return;
+  }
+  const rows = repos.map(r => {
+    const enabled   = r.enabled !== false;
+    const statusBadge = enabled
+      ? '<span class="badge-pill badge-success">&#10003; Enabled</span>'
+      : '<span class="badge-pill badge-muted">Disabled</span>';
+    const gh = localStorage.getItem('dr_gh_repo') || '';
+    const mirrorLink = gh
+      ? `<a href="https://github.com/${gh}/${r.ado_repo}" target="_blank" rel="noopener" style="font-size:12px;color:var(--primary)">&#128279; GitHub mirror</a>`
+      : '<span style="color:var(--muted);font-size:12px">—</span>';
+    return `<tr>
+      <td><strong>${r.ado_repo}</strong></td>
+      <td><code>${r.ado_org}</code></td>
+      <td><code>${r.ado_project}</code></td>
+      <td>${statusBadge}</td>
+      <td>${mirrorLink}</td>
+    </tr>`;
+  }).join('');
+  $('tableArea').innerHTML = `
+    <table class="tbl">
+      <thead><tr>
+        <th>Repository</th><th>ADO Org</th><th>ADO Project</th><th>Status</th><th>Mirror Link</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+
+function renderAdoTable() {
+  const repos = adoData.repos || [];
+  if (!repos.length) {
+    $('adoTableArea').innerHTML = '<p class="empty" style="padding:16px">No discovered repos.</p>';
+    return;
+  }
+  const mirroredSet = new Set(allRepos.filter(r => r.enabled !== false).map(r => r.ado_repo));
+  const rows = repos.map(name => {
+    const mirrored = mirroredSet.has(name);
+    const badge = mirrored
+      ? '<span class="badge-pill badge-success">Mirrored</span>'
+      : '<span class="badge-pill badge-muted">Not selected</span>';
+    const action = mirrored
+      ? ''
+      : `<a href="repos.html" style="font-size:12px;color:var(--primary)">+ Add to mirror</a>`;
+    return `<tr><td><strong>${name}</strong></td><td>${badge}</td><td>${action}</td></tr>`;
+  }).join('');
+  $('adoTableArea').innerHTML = `
+    <table class="tbl">
+      <thead><tr><th>ADO Repository</th><th>Mirror Status</th><th>Action</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+
+function filterTable() {
+  const q = $('filterInput').value.toLowerCase();
+  const filtered = allRepos.filter(r =>
+    r.ado_repo.toLowerCase().includes(q) ||
+    (r.ado_org  || '').toLowerCase().includes(q) ||
+    (r.ado_project || '').toLowerCase().includes(q)
+  );
+  renderTable(filtered);
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DR WorkflowHub — Repositories</title>
+  <link rel="stylesheet" href="shared.css">
+</head>
+<body>
+
+<nav>
+  <a class="nav-brand" href="index.html">
+    <svg width="20" height="20" viewBox="0 0 20 20" fill="white">
+      <path d="M10 0C4.477 0 0 4.477 0 10c0 4.418 2.865 8.166 6.839 9.489.5.092.682-.217.682-.482 0-.237-.008-.866-.013-1.7-2.782.604-3.369-1.34-3.369-1.34-.454-1.156-1.11-1.463-1.11-1.463-.908-.62.069-.608.069-.608 1.003.07 1.531 1.03 1.531 1.03.892 1.529 2.341 1.087 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.11-4.555-4.943 0-1.091.39-1.984 1.029-2.683-.103-.253-.446-1.27.098-2.647 0 0 .84-.269 2.75 1.025A9.578 9.578 0 0110 4.836a9.59 9.59 0 012.504.337c1.909-1.294 2.747-1.025 2.747-1.025.546 1.377.203 2.394.1 2.647.64.699 1.028 1.592 1.028 2.683 0 3.842-2.339 4.687-4.566 4.935.359.309.678.919.678 1.852 0 1.336-.012 2.415-.012 2.741 0 .267.18.578.688.48C17.137 18.163 20 14.418 20 10 20 4.477 15.523 0 10 0z"/>
+    </svg>
+    DR WorkflowHub
+  </a>
+  <div class="nav-links">
+    <a class="nav-link" href="index.html">&#127968; Home</a>
+    <a class="nav-link active" href="repos.html">&#128193; Repositories</a>
+    <a class="nav-link" href="reporting.html">&#128202; Reporting</a>
+    <a class="nav-link" href="restore.html">&#128257; Restore</a>
+  </div>
+  <span class="nav-badge">Enterprise DR Tool</span>
+</nav>
+
+<main>
+  <div>
+    <div class="page-title">&#128193; Repositories</div>
+    <div class="page-subtitle">Select Azure DevOps repositories to include in the nightly DR mirror.</div>
+  </div>
+
+  <div id="globalMsg"></div>
+
+  <!-- ADO Connection Card -->
+  <div class="card">
+    <div class="card-header">
+      <span>&#9729; Azure DevOps Connection</span>
+      <span id="connStatus" style="font-size:12px;color:var(--muted)">Not connected</span>
+    </div>
+    <div class="card-body">
+      <p class="section-intro">
+        Configure the ADO organization and project to fetch repositories from.
+        Changes take effect when you click <strong>Refresh from ADO</strong>.
+        Settings are saved in <code>localStorage</code>.
+      </p>
+      <div class="grid3">
+        <div class="field" style="margin-bottom:0">
+          <label class="lbl" for="adoOrg">ADO Organization</label>
+          <input type="text" id="adoOrg" placeholder="e.g. binhsps" oninput="saveAdoConfig()">
+          <p class="help">Your Azure DevOps org name (not the full URL).</p>
+        </div>
+        <div class="field" style="margin-bottom:0">
+          <label class="lbl" for="adoProject">ADO Project</label>
+          <input type="text" id="adoProject" placeholder="e.g. Test1" oninput="saveAdoConfig()">
+          <p class="help">The project to list repositories from.</p>
+        </div>
+        <div class="field" style="margin-bottom:0">
+          <label class="lbl" for="ghRepo">GitHub Repository (owner/name)</label>
+          <input type="text" id="ghRepo" placeholder="riyajgit/workflow-hub" oninput="saveConfig()">
+          <p class="help">Workflow-hub that hosts the GitHub Actions.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Available Repos Card -->
+  <div class="card">
+    <div class="card-header">
+      <span>Available Azure DevOps Repositories</span>
+      <button class="btn btn-outline btn-sm" onclick="triggerRefresh()">&#8635; Refresh from ADO</button>
+    </div>
+    <div class="card-body">
+      <div id="repoArea"><p class="empty"><span class="spinner"></span>&nbsp;Loading repositories&hellip;</p></div>
+      <p class="meta" id="cacheMeta"></p>
+    </div>
+  </div>
+
+  <!-- Save Selection Card -->
+  <div class="card">
+    <div class="card-header">Save Selection for Daily Mirror</div>
+    <div class="card-body">
+      <p style="font-size:13px;margin-bottom:8px">
+        Checked repos will be written to <code>repos.json</code> and mirrored nightly by <code>dr-mirror.yml</code>.
+      </p>
+      <div id="selTags"><p class="empty">No repos selected.</p></div>
+      <div class="actions">
+        <button class="btn btn-success" id="btnSave" onclick="saveSelection()" disabled>&#10003; Save &amp; Enable for Daily Mirror</button>
+        <button class="btn btn-outline" onclick="clearAll()">Clear All</button>
+        <button class="btn btn-ghost btn-sm" onclick="selectAll()">Select All</button>
+      </div>
+      <div class="pat-drawer hidden" id="patDrawer">
+        <div class="pat-row">
+          <div class="field">
+            <label class="lbl" for="pat">&#128273; GitHub PAT &mdash; <span style="font-weight:400;color:var(--muted)">needs <code>repo</code> + <code>workflow</code> scopes</span></label>
+            <input type="password" id="pat" placeholder="ghp_xxxxxxxxxxxxxxxxxxxx" autocomplete="off" oninput="onPatInput()">
+          </div>
+          <button class="btn btn-outline btn-sm" style="margin-bottom:1px" onclick="clearPat()">Sign out</button>
+        </div>
+        <p class="pat-status none" id="patStatus">Saved in browser localStorage &mdash; you only need to enter this once.</p>
+        <p class="help" style="margin-top:4px">
+          Generate at <a href="https://github.com/settings/tokens" target="_blank" rel="noopener">github.com/settings/tokens</a>.
+          Token is never sent anywhere except the GitHub API over HTTPS.
+        </p>
+      </div>
+    </div>
+  </div>
+
+</main>
+
+<script>
+'use strict';
+const S = { repos: [], selected: new Set(), adoOrg: '', adoProject: '' };
+const $ = id => document.getElementById(id);
+const ghRepo = () => $('ghRepo').value.trim();
+const pat = () => $('pat').value.trim();
+
+function showMsg(html, type = 'info') { $('globalMsg').innerHTML = `<div class="msg ${type}">${html}</div>`; }
+function clearMsg() { $('globalMsg').innerHTML = ''; }
+function apiHeaders() {
+  return {
+    'Authorization': `Bearer ${pat()}`,
+    'Accept': 'application/vnd.github+json',
+    'X-GitHub-Api-Version': '2022-11-28'
+  };
+}
+
+window.addEventListener('DOMContentLoaded', async () => {
+  $('ghRepo').value   = localStorage.getItem('dr_gh_repo') || '';
+  $('adoOrg').value   = localStorage.getItem('dr_ado_org') || '';
+  $('adoProject').value = localStorage.getItem('dr_ado_project') || '';
+  const saved = localStorage.getItem('dr_gh_pat');
+  if (saved) $('pat').value = saved;
+  updatePatStatus();
+  await Promise.all([loadAdoCache(), loadCurrentSelection()]);
+  $('btnSave').disabled = false;
+});
+
+function saveConfig()    { localStorage.setItem('dr_gh_repo', $('ghRepo').value.trim()); }
+function saveAdoConfig() {
+  localStorage.setItem('dr_ado_org',     $('adoOrg').value.trim());
+  localStorage.setItem('dr_ado_project', $('adoProject').value.trim());
+}
+
+async function loadAdoCache() {
+  try {
+    const res = await fetch('./ado-repos-cached.json');
+    if (!res.ok) throw new Error(res.status);
+    const data = await res.json();
+    S.repos      = data.repos || [];
+    S.adoOrg     = data.ado_org || '';
+    S.adoProject = data.ado_project || '';
+
+    // Pre-fill inputs if not already set
+    if (!$('adoOrg').value)     { $('adoOrg').value     = S.adoOrg;     localStorage.setItem('dr_ado_org', S.adoOrg); }
+    if (!$('adoProject').value) { $('adoProject').value = S.adoProject; localStorage.setItem('dr_ado_project', S.adoProject); }
+
+    $('cacheMeta').textContent = `Last refreshed: ${data.fetched_at || 'unknown'} by ${data.fetched_by || '—'} | Org: ${S.adoOrg} / Project: ${S.adoProject}`;
+    $('connStatus').textContent = `${S.adoOrg} / ${S.adoProject}`;
+    $('connStatus').style.color = 'var(--success)';
+    renderRepos();
+  } catch (_) {
+    $('repoArea').innerHTML = '<div class="msg warning"><strong>ado-repos-cached.json not found.</strong><br>Enter your ADO Org and Project above, then click <strong>&#8635; Refresh from ADO</strong>.</div>';
+  }
+}
+
+async function loadCurrentSelection() {
+  try {
+    const res = await fetch('./repos.json');
+    if (!res.ok) return;
+    const current = await res.json();
+    current.filter(r => r.enabled !== false).forEach(r => S.selected.add(r.ado_repo));
+    renderRepos();
+    renderTags();
+  } catch (_) {}
+}
+
+function renderRepos() {
+  if (!S.repos.length) return;
+  $('repoArea').innerHTML = '<div class="repo-grid">' +
+    S.repos.map(name => {
+      const on = S.selected.has(name);
+      const esc = name.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+      return `<label class="repo-tile${on ? ' on' : ''}" id="tile-${CSS.escape(name)}">` +
+        `<input type="checkbox" ${on ? 'checked' : ''} onchange="toggle('${esc}',this.checked)">` +
+        `<span class="rname" title="${name}">${name}</span></label>`;
+    }).join('') + '</div>';
+}
+
+function renderTags() {
+  $('selTags').innerHTML = S.selected.size
+    ? '<div class="tags">' + [...S.selected].map(n => `<span class="tag">${n}</span>`).join('') + '</div>'
+    : '<p class="empty">No repos selected.</p>';
+}
+
+function toggle(name, checked) {
+  checked ? S.selected.add(name) : S.selected.delete(name);
+  const t = $('tile-' + CSS.escape(name));
+  if (t) t.classList.toggle('on', checked);
+  renderTags();
+}
+
+function clearAll() {
+  S.selected.clear();
+  document.querySelectorAll('.repo-tile').forEach(t => t.classList.remove('on'));
+  document.querySelectorAll('.repo-tile input').forEach(cb => { cb.checked = false; });
+  renderTags();
+}
+
+function selectAll() {
+  S.repos.forEach(name => {
+    S.selected.add(name);
+    const t = $('tile-' + CSS.escape(name));
+    if (t) { t.classList.add('on'); t.querySelector('input').checked = true; }
+  });
+  renderTags();
+}
+
+function requirePat(cb) {
+  $('patDrawer').classList.remove('hidden');
+  if (pat()) { cb(); return; }
+  $('pat').focus();
+  showMsg('Enter your GitHub PAT below to continue.', 'info');
+  window._pendingCb = cb;
+}
+
+function onPatInput() {
+  const val = $('pat').value.trim();
+  if (val) {
+    localStorage.setItem('dr_gh_pat', val);
+    updatePatStatus();
+    if (window._pendingCb) { const cb = window._pendingCb; window._pendingCb = null; clearMsg(); cb(); }
+  }
+}
+
+function clearPat() {
+  localStorage.removeItem('dr_gh_pat');
+  $('pat').value = '';
+  updatePatStatus();
+  showMsg('PAT removed from localStorage.', 'info');
+}
+
+function updatePatStatus() {
+  const el = $('patStatus');
+  if (pat()) { el.textContent = '✓ PAT saved in browser localStorage.'; el.className = 'pat-status ok'; }
+  else { el.textContent = 'No PAT saved — enter one below to enable Save and Refresh.'; el.className = 'pat-status none'; }
+}
+
+function getAdoOrg()     { return $('adoOrg').value.trim()     || S.adoOrg; }
+function getAdoProject() { return $('adoProject').value.trim() || S.adoProject; }
+
+function triggerRefresh() { requirePat(_doRefresh); }
+async function _doRefresh() {
+  if (!ghRepo()) { showMsg('Set the GitHub Repository in the Configuration card above.', 'error'); return; }
+  const org     = getAdoOrg();
+  const project = getAdoProject();
+  if (!org)     { showMsg('Enter an ADO Organization in the connection card above.', 'error'); return; }
+  if (!project) { showMsg('Enter an ADO Project in the connection card above.', 'error'); return; }
+  showMsg('<span class="spinner"></span>&nbsp;Triggering ADO repo refresh&hellip;');
+  try {
+    const res = await fetch(`https://api.github.com/repos/${ghRepo()}/actions/workflows/dr-list-repos.yml/dispatches`,
+      { method: 'POST', headers: { ...apiHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ref: 'main', inputs: { ado_org: org, ado_project: project } }) });
+    if (res.status === 204) {
+      showMsg('Refresh workflow triggered &#10003;<br>Wait ~30 seconds, then reload this page to see the updated list.', 'success');
+    } else throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+  } catch (e) { showMsg(`Refresh failed: ${e.message}`, 'error'); }
+}
+
+function saveSelection() {
+  if (!S.selected.size) { showMsg('Select at least one repo.', 'error'); return; }
+  requirePat(_doSave);
+}
+async function _doSave() {
+  if (!ghRepo()) { showMsg('Set the GitHub Repository in the Configuration card above.', 'error'); return; }
+  const org     = getAdoOrg();
+  const project = getAdoProject();
+  if (!org)     { showMsg('Enter an ADO Organization in the connection card above.', 'error'); return; }
+  if (!project) { showMsg('Enter an ADO Project in the connection card above.', 'error'); return; }
+  const repoList = [...S.selected].join(',');
+  showMsg('<span class="spinner"></span>&nbsp;Saving selection&hellip;');
+  try {
+    const res = await fetch(`https://api.github.com/repos/${ghRepo()}/actions/workflows/dr-select-repos.yml/dispatches`,
+      { method: 'POST', headers: { ...apiHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ref: 'main', inputs: { ado_org: org, ado_project: project, repos_to_mirror: repoList } }) });
+    if (res.status === 204) {
+      showMsg(`Selection saved &#10003; &mdash; <strong>${repoList}</strong><br>The <em>dr-select-repos</em> workflow is running and will update <code>repos.json</code>. Reload in ~30 seconds to confirm.`, 'success');
+    } else throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+  } catch (e) { showMsg(`Save failed: ${e.message}`, 'error'); }
+}
+</script>
+</body>
+</html>
