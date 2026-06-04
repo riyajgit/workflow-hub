@@ -8,12 +8,6 @@
   {
     "ado_org": "binhsps",
     "ado_project": "Test1",
-    "ado_repo": "hostedagent",
-    "enabled": true
-  },
-  {
-    "ado_org": "binhsps",
-    "ado_project": "Test1",
     "ado_repo": "mirrortest",
     "enabled": true
   },
