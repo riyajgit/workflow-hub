@@ -1,16 +1,14 @@
 {
   "ado_org": "binhsps",
-  "ado_project": "Test1",
-  "fetched_at": "2026-06-04T20:59:04Z",
+  "ado_project": "Cloud Platform",
+  "fetched_at": "2026-06-04T22:54:31Z",
   "fetched_by": "riyajgit",
   "repos": [
-    "Test1",
-    "Test1.riyaj.peer.mohammed",
-    "env-tf-modules",
-    "env-tf-modules.riyaj.peer.mohammed",
-    "hostedagent",
-    "mirrortest",
-    "pipelinetest",
-    "selfhost"
+    "Automation_Test_Dev",
+    "Cloud Platform",
+    "Hashicorp_Automation",
+    "Migration",
+    "Powershell_Scripts",
+    "Rota Funcation App"
   ]
 }
