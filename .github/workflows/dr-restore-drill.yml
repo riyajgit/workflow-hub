@@ -1,0 +1,262 @@
+name: DR - Restore Drill (Mock Restore to ADO)
+
+# PURPOSE: Performs a mock DR restoration from GitHub backup repos into
+#          NEW isolated Azure DevOps repos. Never overwrites existing repos.
+#          Run this periodically to prove your backups are actually restorable.
+#
+# SAFE BY DESIGN:
+#   - Refuses to run if the restore target repo already exists in ADO.
+#   - Restores into a separate ADO project (recommended) or same project with suffix.
+#   - Does NOT touch original source repos.
+#
+# USAGE:
+#   1. Run workflow_dispatch and fill in the inputs.
+#   2. Review the run summary for per-repo parity results.
+#   3. Manually inspect the restored ADO repo and then delete it when done.
+
+on:
+  workflow_dispatch:
+    inputs:
+      repos_to_restore:
+        description: |
+          Comma-separated ado_repo names to restore (e.g. selfhost,hostedagent).
+          Required — leaving this blank will abort the workflow.
+        required: true
+        type: string
+      target_ado_org:
+        description: Azure DevOps organization to restore into
+        required: true
+        default: 'binhsps'
+        type: string
+      target_ado_project:
+        description: |
+          ADO project to restore into. Use a dedicated DR-Test project to stay
+          fully isolated from production repos.
+        required: true
+        default: 'Test1-DR'
+        type: string
+      restore_suffix:
+        description: |
+          Suffix appended to each restored repo name to avoid collision.
+          Example: _dr_restore results in selfhost_dr_restore
+        required: true
+        default: '_dr_restore'
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dr-restore-drill
+  cancel-in-progress: false   # Never cancel a restore in progress
+
+jobs:
+  # ── Build the restore matrix ──────────────────────────────────────────────
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.build.outputs.matrix }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build restore matrix
+        id: build
+        env:
+          REPOS_INPUT: ${{ github.event.inputs.repos_to_restore }}
+        run: |
+          if [ -z "$REPOS_INPUT" ]; then
+            echo "ERROR: repos_to_restore is required. Specify at least one repo name."
+            exit 1
+          fi
+
+          FILTER=$(printf '%s' "$REPOS_INPUT" \
+            | jq -R 'split(",") | map(gsub("^\\s+|\\s+$";"")) | map(select(length > 0))')
+          ALL=$(jq -c '[.[] | select((has("enabled") | not) or (.enabled == true))]' repos.json)
+          MATRIX=$(jq -cn \
+            --argjson all    "$ALL" \
+            --argjson filter "$FILTER" \
+            '$all | map(select(.ado_repo as $r | $filter | any(. == $r)))')
+
+          COUNT=$(echo "$MATRIX" | jq 'length')
+          if [ "$COUNT" -eq 0 ]; then
+            echo "ERROR: No repos matched. Check repos.json and input."
+            exit 1
+          fi
+
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+          echo "Repos queued for restore drill: $COUNT"
+
+          {
+            echo "## DR Restore Drill — $(date -u '+%Y-%m-%d %H:%M UTC')"
+            echo ""
+            echo "| Input | Value |"
+            echo "|-------|-------|"
+            echo "| Target ADO Org | \`${{ github.event.inputs.target_ado_org }}\` |"
+            echo "| Target ADO Project | \`${{ github.event.inputs.target_ado_project }}\` |"
+            echo "| Restore suffix | \`${{ github.event.inputs.restore_suffix }}\` |"
+            echo "| Triggered by | \`${{ github.actor }}\` |"
+            echo ""
+            echo "**Repos selected ($COUNT):**"
+            echo "$MATRIX" | jq -r '.[] | "- `" + .ado_repo + "`"'
+            echo ""
+            echo "---"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ── Per-repo: create isolated ADO repo, restore, verify ──────────────────
+  restore:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      matrix:
+        repo: ${{ fromJson(needs.prepare.outputs.matrix) }}
+      fail-fast: false      # Attempt all repos even if one fails
+
+    steps:
+      - name: Set names for this restore
+        run: |
+          RESTORE_REPO="${{ matrix.repo.ado_repo }}${{ github.event.inputs.restore_suffix }}"
+          BACKUP_REPO="${{ matrix.repo.ado_repo }}_backup"
+          echo "RESTORE_REPO=$RESTORE_REPO" >> "$GITHUB_ENV"
+          echo "BACKUP_REPO=$BACKUP_REPO"   >> "$GITHUB_ENV"
+          echo "Backup source : $BACKUP_REPO (GitHub)"
+          echo "Restore target: $RESTORE_REPO (ADO)"
+
+      - name: Validate secrets
+        run: |
+          if [ -z "${{ secrets.ADO_PAT }}" ]; then echo "ERROR: ADO_PAT missing"; exit 1; fi
+          if [ -z "${{ secrets.GH_PAT }}" ];  then echo "ERROR: GH_PAT missing";  exit 1; fi
+          echo "Secrets OK."
+
+      - name: Safety check — refuse if restore target already exists
+        env:
+          ADO_PAT:        ${{ secrets.ADO_PAT }}
+          TARGET_ORG:     ${{ github.event.inputs.target_ado_org }}
+          TARGET_PROJECT: ${{ github.event.inputs.target_ado_project }}
+        run: |
+          HTTP=$(curl -sS -w "%{http_code}" -o /dev/null \
+            -u ":$ADO_PAT" \
+            "https://dev.azure.com/$TARGET_ORG/$TARGET_PROJECT/_apis/git/repositories/$RESTORE_REPO?api-version=7.1-preview.1")
+
+          if [ "$HTTP" = "200" ]; then
+            echo "ERROR: '$RESTORE_REPO' already exists in $TARGET_ORG/$TARGET_PROJECT."
+            echo "Choose a different --restore_suffix or delete the existing repo first."
+            exit 1
+          fi
+
+          echo "Safety check passed — '$RESTORE_REPO' does not exist yet."
+
+      - name: Create isolated ADO repo
+        env:
+          ADO_PAT:        ${{ secrets.ADO_PAT }}
+          TARGET_ORG:     ${{ github.event.inputs.target_ado_org }}
+          TARGET_PROJECT: ${{ github.event.inputs.target_ado_project }}
+        run: |
+          HTTP=$(curl -sS -w "%{http_code}" -o create-resp.json \
+            -X POST \
+            -u ":$ADO_PAT" \
+            -H "Content-Type: application/json" \
+            -d "{\"name\":\"$RESTORE_REPO\"}" \
+            "https://dev.azure.com/$TARGET_ORG/$TARGET_PROJECT/_apis/git/repositories?api-version=7.1-preview.1")
+
+          if [ "$HTTP" != "201" ]; then
+            echo "ERROR: Failed to create ADO repo (HTTP $HTTP)"
+            cat create-resp.json
+            exit 1
+          fi
+
+          echo "Created: $RESTORE_REPO in $TARGET_ORG/$TARGET_PROJECT"
+
+      - name: Clone from GitHub backup
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+        run: |
+          git clone --mirror \
+            "https://x-access-token:$GH_PAT@github.com/${{ github.repository_owner }}/${BACKUP_REPO}.git" \
+            restore-mirror
+
+          echo "Cloned $BACKUP_REPO — refs:"
+          git -C restore-mirror for-each-ref --format='%(refname)' refs/heads refs/tags | head -30
+
+      - name: Push to isolated ADO restore target
+        env:
+          ADO_PAT:        ${{ secrets.ADO_PAT }}
+          TARGET_ORG:     ${{ github.event.inputs.target_ado_org }}
+          TARGET_PROJECT: ${{ github.event.inputs.target_ado_project }}
+        run: |
+          cd restore-mirror
+          git push --force \
+            "https://:$ADO_PAT@dev.azure.com/$TARGET_ORG/$TARGET_PROJECT/_git/$RESTORE_REPO" \
+            '+refs/heads/*:refs/heads/*' \
+            '+refs/tags/*:refs/tags/*'
+
+          echo "Push complete → https://dev.azure.com/$TARGET_ORG/$TARGET_PROJECT/_git/$RESTORE_REPO"
+
+      - name: Verify restoration (parity check)
+        env:
+          ADO_PAT:        ${{ secrets.ADO_PAT }}
+          TARGET_ORG:     ${{ github.event.inputs.target_ado_org }}
+          TARGET_PROJECT: ${{ github.event.inputs.target_ado_project }}
+        run: |
+          # ── Counts from GitHub backup (local mirror) ──
+          GH_BRANCHES=$(git -C restore-mirror for-each-ref --format='%(refname)' refs/heads | wc -l | tr -d ' ')
+          GH_TAGS=$(    git -C restore-mirror for-each-ref --format='%(refname)' refs/tags  | wc -l | tr -d ' ')
+          GH_HEAD=$(    git -C restore-mirror rev-parse refs/heads/main 2>/dev/null \
+                        || git -C restore-mirror for-each-ref --format='%(objectname)' refs/heads \
+                           | head -1)
+
+          # ── Counts from ADO restore target (live remote) ──
+          ADO_BRANCHES=$(git ls-remote --heads \
+            "https://:$ADO_PAT@dev.azure.com/$TARGET_ORG/$TARGET_PROJECT/_git/$RESTORE_REPO" \
+            | wc -l | tr -d ' ')
+          ADO_TAGS=$(git ls-remote --tags \
+            "https://:$ADO_PAT@dev.azure.com/$TARGET_ORG/$TARGET_PROJECT/_git/$RESTORE_REPO" \
+            | grep -v '\^{}' | wc -l | tr -d ' ')
+          ADO_HEAD=$(git ls-remote \
+            "https://:$ADO_PAT@dev.azure.com/$TARGET_ORG/$TARGET_PROJECT/_git/$RESTORE_REPO" \
+            refs/heads/main 2>/dev/null | awk '{print $1}' \
+            || git ls-remote \
+            "https://:$ADO_PAT@dev.azure.com/$TARGET_ORG/$TARGET_PROJECT/_git/$RESTORE_REPO" \
+            | head -1 | awk '{print $1}')
+
+          echo "GitHub backup  — branches: $GH_BRANCHES, tags: $GH_TAGS, head: ${GH_HEAD:0:10}"
+          echo "ADO restore    — branches: $ADO_BRANCHES, tags: $ADO_TAGS, head: ${ADO_HEAD:0:10}"
+
+          PASS=true
+          NOTES=""
+          [ "$GH_BRANCHES" != "$ADO_BRANCHES" ] && { PASS=false; NOTES="$NOTES Branch count mismatch ($GH_BRANCHES vs $ADO_BRANCHES)."; }
+          [ "$GH_TAGS"     != "$ADO_TAGS"     ] && { PASS=false; NOTES="$NOTES Tag count mismatch ($GH_TAGS vs $ADO_TAGS)."; }
+          [ -n "$GH_HEAD" ] && [ -n "$ADO_HEAD" ] && [ "$GH_HEAD" != "$ADO_HEAD" ] \
+            && { PASS=false; NOTES="$NOTES HEAD commit mismatch."; }
+
+          ADO_URL="https://dev.azure.com/$TARGET_ORG/$TARGET_PROJECT/_git/$RESTORE_REPO"
+
+          if [ "$PASS" = "true" ]; then
+            RESULT="✅ PASSED"
+            echo "VERIFICATION PASSED"
+          else
+            RESULT="❌ FAILED — $NOTES"
+            echo "VERIFICATION FAILED: $NOTES"
+          fi
+
+          {
+            echo "### \`${{ matrix.repo.ado_repo }}\` → \`$RESTORE_REPO\`"
+            echo ""
+            echo "| Metric | GitHub Backup | ADO Restore |"
+            echo "|--------|:-------------:|:-----------:|"
+            echo "| Branches | $GH_BRANCHES | $ADO_BRANCHES |"
+            echo "| Tags | $GH_TAGS | $ADO_TAGS |"
+            echo "| HEAD commit | \`${GH_HEAD:0:10}\` | \`${ADO_HEAD:0:10}\` |"
+            echo "| **Verification** | | **$RESULT** |"
+            echo ""
+            echo "**Restore URL:** [$ADO_URL]($ADO_URL)"
+            echo ""
+            echo "> ⚠️ Delete this isolated repo when the drill is complete."
+            echo ""
+            echo "---"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          [ "$PASS" = "true" ] || exit 1
