@@ -121,7 +121,22 @@
       <div id="repoQuickPick" style="margin-top:6px"></div>
 
       <hr class="divider">
-      <p class="section-title">2. Restore Target</p>
+      <p class="section-title">2. Point-in-Time (optional)</p>
+      <div style="display:flex;gap:12px;align-items:flex-start;flex-wrap:wrap">
+        <div class="field" style="margin-bottom:0;flex:0 0 auto">
+          <label class="lbl" for="restoreAsOf">Restore as of date</label>
+          <input type="date" id="restoreAsOf" style="width:180px;padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-size:13px;background:#fff" oninput="updateAsOfPreview()">
+        </div>
+        <div style="font-size:12px;color:var(--muted);padding-top:18px;line-height:1.8;max-width:480px">
+          Each branch is rewound to its <strong>latest commit on or before</strong> this date.
+          Tags whose commit falls after this date are excluded from the restore.<br>
+          <strong>Leave blank</strong> to restore to the latest backed-up state.
+        </div>
+      </div>
+      <div id="asOfPreview" style="margin-top:8px"></div>
+
+      <hr class="divider">
+      <p class="section-title">3. Restore Target</p>
       <div class="grid2">
         <div class="field">
           <label class="lbl" for="targetOrg">Target ADO Organization</label>
@@ -141,7 +156,7 @@
       </div>
 
       <hr class="divider">
-      <p class="section-title">3. GitHub Access</p>
+      <p class="section-title">4. GitHub Access</p>
       <div class="grid2">
         <div class="field">
           <label class="lbl" for="ghRepo">GitHub Repository (owner/name)</label>
@@ -246,6 +261,7 @@ async function runDrill() {
   const org     = $('targetOrg').value.trim();
   const project = $('targetProject').value.trim();
   const suffix  = $('restoreSuffix').value.trim() || '_dr_restore';
+  const asOf    = $('restoreAsOf').value.trim();   // YYYY-MM-DD or empty
 
   if (!repos)   { showMsg('Enter at least one repository name to restore.', 'error'); return; }
   if (!org)     { showMsg('Enter a target ADO Organization.', 'error'); return; }
@@ -253,24 +269,32 @@ async function runDrill() {
   if (!ghRepo()) { showMsg('Set the GitHub Repository (owner/name) in the GitHub Access section.', 'error'); return; }
   if (!pat())   { showMsg('Enter your GitHub PAT in the GitHub Access section.', 'error'); $('pat').focus(); return; }
 
+  const asOfLine = asOf ? `As-of date: ${asOf} (point-in-time)\n` : '';
   const confirmed = window.confirm(
-    `This will trigger a restore drill:\n\nRepos: ${repos}\nTarget: ${org} / ${project}\nSuffix: ${suffix}\n\nProceed?`
+    `This will trigger a restore drill:\n\nRepos: ${repos}\n${asOfLine}Target: ${org} / ${project}\nSuffix: ${suffix}\n\nProceed?`
   );
   if (!confirmed) return;
 
   showMsg('<span class="spinner"></span>&nbsp;Triggering restore drill workflow&hellip;');
   try {
+    const inputs = {
+      repos_to_restore:   repos,
+      target_ado_org:     org,
+      target_ado_project: project,
+      restore_suffix:     suffix,
+    };
+    if (asOf) inputs.restore_as_of = asOf;
+
     const res = await fetch(`https://api.github.com/repos/${ghRepo()}/actions/workflows/dr-restore-drill.yml/dispatches`,
       { method: 'POST', headers: { ...apiHeaders(), 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ref: 'main', inputs: {
-          repos_to_restore: repos,
-          target_ado_org:   org,
-          target_ado_project: project,
-          restore_suffix:   suffix
-        }}) });
+        body: JSON.stringify({ ref: 'main', inputs }) });
     if (res.status === 204) {
-      showMsg(`Restore drill triggered &#10003;<br>
-        Restoring <strong>${repos}</strong> into <strong>${org}/${project}</strong> with suffix <code>${suffix}</code>.<br>
+      const asOfMsg = asOf
+        ? `<br>&#128337; Point-in-time restore as of <strong>${asOf}</strong>`
+        : '<br>&#128336; Restoring latest backed-up state';
+      showMsg(`Restore drill triggered &#10003;
+        <br>Restoring <strong>${repos}</strong> into <strong>${org}/${project}</strong> with suffix <code>${suffix}</code>
+        ${asOfMsg}<br>
         <a href="${ghRepo() ? `https://github.com/${ghRepo()}/actions/workflows/dr-restore-drill.yml` : '#'}" target="_blank" rel="noopener">
           &#128279; Monitor the workflow run on GitHub
         </a>`, 'success');
@@ -278,10 +302,23 @@ async function runDrill() {
   } catch (e) { showMsg(`Drill failed to trigger: ${e.message}`, 'error'); }
 }
 
+function updateAsOfPreview() {
+  const val = $('restoreAsOf').value;
+  const el  = $('asOfPreview');
+  if (!val) { el.innerHTML = ''; return; }
+  const d = new Date(val + 'T23:59:59Z');
+  el.innerHTML = `<div class="msg info" style="display:inline-flex;align-items:center;gap:8px;padding:6px 12px">
+    &#128337; Branches will be rewound to their state on <strong>${d.toDateString()}</strong>.
+    Commits and tags after this date will be excluded from the restore.
+  </div>`;
+}
+
 function clearForm() {
   $('reposToRestore').value = '';
+  $('restoreAsOf').value    = '';
   $('targetProject').value  = 'Test1-DR';
   $('restoreSuffix').value  = '_dr_restore';
+  $('asOfPreview').innerHTML = '';
   _picked.clear();
   document.querySelectorAll('#repoQuickPick .tag').forEach(el => el.style.background = '');
   clearMsg();

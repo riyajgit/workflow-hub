@@ -42,6 +42,15 @@ on:
         required: true
         default: '_dr_restore'
         type: string
+      restore_as_of:
+        description: |
+          Optional point-in-time restore: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ.
+          Each branch is rewound to its latest commit on or before this date.
+          Tags whose commit falls after this date are excluded.
+          Leave blank to restore to the latest backed-up state.
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: read
@@ -95,6 +104,12 @@ jobs:
             echo "| Target ADO Org | \`${{ github.event.inputs.target_ado_org }}\` |"
             echo "| Target ADO Project | \`${{ github.event.inputs.target_ado_project }}\` |"
             echo "| Restore suffix | \`${{ github.event.inputs.restore_suffix }}\` |"
+            ASOF="${{ github.event.inputs.restore_as_of }}"
+            if [ -n "$ASOF" ]; then
+              echo "| **Restore as-of** | \`$ASOF\` ⏱️ point-in-time |"
+            else
+              echo "| Restore as-of | Latest backup (no date filter) |"
+            fi
             echo "| Triggered by | \`${{ github.actor }}\` |"
             echo ""
             echo "**Repos selected ($COUNT):**"
@@ -180,6 +195,73 @@ jobs:
           echo "Cloned $BACKUP_REPO — refs:"
           git -C restore-mirror for-each-ref --format='%(refname)' refs/heads refs/tags | head -30
 
+      - name: Rewind refs to point-in-time (restore_as_of)
+        if: ${{ github.event.inputs.restore_as_of != '' }}
+        run: |
+          RESTORE_DATE="${{ github.event.inputs.restore_as_of }}"
+          # Normalise: accept YYYY-MM-DD or ISO-8601; git/date both handle it fine
+          CUTOFF="${RESTORE_DATE}T23:59:59Z"
+          echo "Point-in-time restore — rewinding all refs to: $CUTOFF"
+          echo ""
+
+          # ── Rewind branches ───────────────────────────────────────────────
+          KEPT_BRANCHES=0
+          DROPPED_BRANCHES=0
+          while IFS= read -r REF; do
+            BRANCH="${REF#refs/heads/}"
+            AS_OF=$(git -C restore-mirror rev-list "$REF" \
+              --before="$CUTOFF" --max-count=1 2>/dev/null || true)
+
+            if [ -z "$AS_OF" ]; then
+              echo "  DROP branch '$BRANCH' — no commits before $CUTOFF"
+              git -C restore-mirror update-ref -d "$REF"
+              DROPPED_BRANCHES=$((DROPPED_BRANCHES + 1))
+            else
+              COMMIT_TIME=$(git -C restore-mirror log --format='%ai' -1 "$AS_OF")
+              echo "  KEEP branch '$BRANCH' → ${AS_OF:0:10} ($COMMIT_TIME)"
+              git -C restore-mirror update-ref "$REF" "$AS_OF"
+              KEPT_BRANCHES=$((KEPT_BRANCHES + 1))
+            fi
+          done < <(git -C restore-mirror for-each-ref --format='%(refname)' refs/heads)
+
+          if [ "$KEPT_BRANCHES" -eq 0 ]; then
+            echo ""
+            echo "ERROR: No branches have any commits on or before $RESTORE_DATE."
+            echo "       The earliest commit in this repo may be after the requested date."
+            exit 1
+          fi
+
+          # ── Remove tags whose commit falls after the cutoff ───────────────
+          KEPT_TAGS=0
+          DROPPED_TAGS=0
+          while IFS= read -r TAG_REF; do
+            TAG="${TAG_REF#refs/tags/}"
+            # Dereference annotated tags to the underlying commit
+            TAG_COMMIT=$(git -C restore-mirror rev-list -1 "${TAG_REF}^{}" -- 2>/dev/null \
+              || git -C restore-mirror rev-list -1 "$TAG_REF" -- 2>/dev/null || true)
+
+            if [ -z "$TAG_COMMIT" ]; then
+              KEPT_TAGS=$((KEPT_TAGS + 1))
+              continue
+            fi
+
+            COMMIT_EPOCH=$(git -C restore-mirror log --format='%ct' -1 "$TAG_COMMIT")
+            CUTOFF_EPOCH=$(date -d "$CUTOFF" +%s)
+
+            if [ "$COMMIT_EPOCH" -gt "$CUTOFF_EPOCH" ]; then
+              echo "  DROP tag '$TAG' — commit $(date -d "@$COMMIT_EPOCH" '+%Y-%m-%d') is after cutoff"
+              git -C restore-mirror update-ref -d "$TAG_REF"
+              DROPPED_TAGS=$((DROPPED_TAGS + 1))
+            else
+              echo "  KEEP tag '$TAG'"
+              KEPT_TAGS=$((KEPT_TAGS + 1))
+            fi
+          done < <(git -C restore-mirror for-each-ref --format='%(refname)' refs/tags)
+
+          echo ""
+          echo "Result: kept $KEPT_BRANCHES branches (dropped $DROPPED_BRANCHES), kept $KEPT_TAGS tags (dropped $DROPPED_TAGS)"
+          echo "RESTORE_DATE=$RESTORE_DATE" >> "$GITHUB_ENV"
+
       - name: Push to isolated ADO restore target
         env:
           ADO_PAT:        ${{ secrets.ADO_PAT }}
@@ -244,6 +326,10 @@ jobs:
           {
             echo "### \`${{ matrix.repo.ado_repo }}\` → \`$RESTORE_REPO\`"
             echo ""
+            if [ -n "$RESTORE_DATE" ]; then
+              echo "> ⏱️ Point-in-time restore — branches rewound to **$RESTORE_DATE**"
+              echo ""
+            fi
             echo "| Metric | GitHub Backup | ADO Restore |"
             echo "|--------|:-------------:|:-----------:|"
             echo "| Branches | $GH_BRANCHES | $ADO_BRANCHES |"
