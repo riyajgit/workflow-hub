@@ -1,0 +1,16 @@
+{
+  "ado_org": "binhsps",
+  "ado_project": "Test1",
+  "fetched_at": "2026-06-04T15:10:30Z",
+  "fetched_by": "riyajgit",
+  "repos": [
+    "Test1",
+    "Test1.riyaj.peer.mohammed",
+    "env-tf-modules",
+    "env-tf-modules.riyaj.peer.mohammed",
+    "hostedagent",
+    "mirrortest",
+    "pipelinetest",
+    "selfhost"
+  ]
+}
