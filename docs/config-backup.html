@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DR WorkflowHub — Config Backup</title>
+  <link rel="stylesheet" href="shared.css">
+  <script src="shared.js" defer></script>
+</head>
+<body>
+
+<nav>
+  <a class="nav-brand" href="index.html">
+    <svg width="20" height="20" viewBox="0 0 20 20" fill="white">
+      <path d="M10 0C4.477 0 0 4.477 0 10c0 4.418 2.865 8.166 6.839 9.489.5.092.682-.217.682-.482 0-.237-.008-.866-.013-1.7-2.782.604-3.369-1.34-3.369-1.34-.454-1.156-1.11-1.463-1.11-1.463-.908-.62.069-.608.069-.608 1.003.07 1.531 1.03 1.531 1.03.892 1.529 2.341 1.087 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.11-4.555-4.943 0-1.091.39-1.984 1.029-2.683-.103-.253-.446-1.27.098-2.647 0 0 .84-.269 2.75 1.025A9.578 9.578 0 0110 4.836a9.59 9.59 0 012.504.337c1.909-1.294 2.747-1.025 2.747-1.025.546 1.377.203 2.394.1 2.647.64.699 1.028 1.592 1.028 2.683 0 3.842-2.339 4.687-4.566 4.935.359.309.678.919.678 1.852 0 1.336-.012 2.415-.012 2.741 0 .267.18.578.688.48C17.137 18.163 20 14.418 20 10 20 4.477 15.523 0 10 0z"/>
+    </svg>
+    DR WorkflowHub
+  </a>
+  <div class="nav-links">
+    <a class="nav-link" href="index.html">&#127968; Home</a>
+    <a class="nav-link" href="repos.html">&#128193; Repositories</a>
+    <a class="nav-link" href="reporting.html">&#128202; Reporting</a>
+    <a class="nav-link" href="restore.html">&#128257; Restore</a>
+    <a class="nav-link active" href="config-backup.html">&#128190; Config Backup</a>
+  </div>
+  <span class="nav-badge">Enterprise DR Tool</span>
+</nav>
+
+<main>
+  <div>
+    <div class="page-title">&#128190; Config Backup</div>
+    <div class="page-subtitle">Backup and view non-repository ADO components: pipelines, variable groups, service connections, environments, dashboards, wikis.</div>
+  </div>
+
+  <div id="globalMsg"></div>
+
+  <!-- What gets backed up -->
+  <div class="card">
+    <div class="card-header">What Gets Backed Up</div>
+    <div class="card-body">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;font-size:13px">
+        <div>
+          <div style="font-weight:600;margin-bottom:8px">&#9989; Included in backup</div>
+          <ul style="list-style:none;padding:0;line-height:2;color:var(--muted)">
+            <li>&#128260; Build pipeline definitions (classic + YAML settings)</li>
+            <li>&#128260; Release pipeline definitions</li>
+            <li>&#128272; Variable groups <em style="font-size:11px">(secret values masked by ADO)</em></li>
+            <li>&#128279; Service connections <em style="font-size:11px">(credentials excluded by ADO)</em></li>
+            <li>&#127759; Environments</li>
+            <li>&#128202; Dashboards</li>
+            <li>&#128214; Wiki repos (names + clone URLs)</li>
+            <li>&#129520; Agent pools (org-level)</li>
+          </ul>
+        </div>
+        <div>
+          <div style="font-weight:600;margin-bottom:8px">&#9888; Not included / separate handling</div>
+          <ul style="list-style:none;padding:0;line-height:2;color:var(--muted)">
+            <li>&#128275; Secret variable values (ADO never exposes these via API)</li>
+            <li>&#128275; Service connection credentials (same — by design)</li>
+            <li>&#128203; Work items / boards (use ADO Migration Tools for these)</li>
+            <li>&#129513; Test plans &amp; cases (export manually or via migration tools)</li>
+            <li>&#128230; Artifact packages (handled separately per feed)</li>
+          </ul>
+          <div style="margin-top:10px;font-size:12px;color:var(--muted)">
+            <strong style="color:var(--text)">Wiki repos?</strong> They are Git repos &mdash; add them to the
+            <a href="repos.html">Repositories</a> mirror for full content backup.
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ADO Connection + Trigger -->
+  <div class="card">
+    <div class="card-header">
+      <span>&#9729; ADO Connection &amp; Trigger</span>
+      <span id="connStatus" style="font-size:12px;color:var(--muted)"></span>
+    </div>
+    <div class="card-body">
+      <div class="grid3">
+        <div class="field" style="margin-bottom:0">
+          <label class="lbl" for="adoOrg">ADO Organization</label>
+          <input type="text" id="adoOrg" placeholder="e.g. binhsps" oninput="saveAdoConfig();scheduleReload()">
+          <p class="help">Your Azure DevOps org name.</p>
+        </div>
+        <div class="field" style="margin-bottom:0">
+          <label class="lbl" for="adoProject">ADO Project</label>
+          <input type="text" id="adoProject" placeholder="e.g. Test1" oninput="saveAdoConfig();scheduleReload()">
+          <p class="help">Project to back up configuration from.</p>
+        </div>
+        <div class="field" style="margin-bottom:0">
+          <label class="lbl" for="ghRepo">GitHub Repository (owner/name)</label>
+          <input type="text" id="ghRepo" placeholder="riyajgit/workflow-hub" oninput="saveConfig()">
+          <p class="help">Workflow-hub hosting <code>dr-backup-config.yml</code>.</p>
+        </div>
+      </div>
+      <div class="pat-drawer hidden" id="patDrawer">
+        <div class="pat-row" style="margin-top:14px">
+          <div class="field">
+            <label class="lbl" for="pat">&#128273; GitHub PAT &mdash; <span style="font-weight:400;color:var(--muted)">needs <code>repo</code> + <code>workflow</code> scopes</span></label>
+            <input type="password" id="pat" placeholder="ghp_xxxxxxxxxxxxxxxxxxxx" autocomplete="off" oninput="onPatInput()">
+          </div>
+          <button class="btn btn-outline btn-sm" style="margin-top:16px" onclick="clearPat()">Sign out</button>
+        </div>
+        <p class="pat-status none" id="patStatus" style="font-size:12px;margin-top:4px"></p>
+      </div>
+      <div class="actions">
+        <button class="btn btn-primary" id="btnRunBackup" onclick="triggerBackup()">&#128190; Run Backup Now</button>
+        <button class="btn btn-outline btn-sm" onclick="togglePat()">&#128273; PAT settings</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Last Backup Summary -->
+  <div class="card">
+    <div class="card-header">
+      <span>Last Backup Summary</span>
+      <div style="display:flex;gap:8px;align-items:center">
+        <span id="lastBackupTime" style="font-size:12px;color:var(--muted)"></span>
+        <button class="btn btn-outline btn-sm" onclick="loadManifest()">&#8635; Refresh</button>
+        <a id="ghRunsLink" href="#" target="_blank" rel="noopener" class="btn btn-outline btn-sm">&#128279; Workflow Runs</a>
+      </div>
+    </div>
+    <div class="card-body">
+      <div id="statsRow" class="stat-grid" style="margin-bottom:16px"></div>
+      <div id="componentTable"></div>
+    </div>
+  </div>
+
+  <!-- Wiki Repos -->
+  <div class="card" id="wikiCard" style="display:none">
+    <div class="card-header">
+      <span>&#128214; Wiki Repos Discovered</span>
+      <span style="font-size:12px;color:var(--muted)">Wiki repos are Git repos &mdash; mirror them for full backup</span>
+    </div>
+    <div class="card-body" style="padding:0">
+      <div id="wikiTable"></div>
+    </div>
+  </div>
+
+  <!-- Raw file links -->
+  <div class="card" id="rawFilesCard" style="display:none">
+    <div class="card-header">&#128196; Raw Backup Files (GitHub)</div>
+    <div class="card-body">
+      <p class="section-intro">Full JSON exports are stored in the GitHub repository (not web-exposed). View or download them directly on GitHub.</p>
+      <div id="rawFileLinks" class="tags"></div>
+    </div>
+  </div>
+
+</main>
+
+<script>
+'use strict';
+const $ = id => document.getElementById(id);
+const ghRepo = () => $('ghRepo').value.trim();
+const pat    = () => $('pat').value.trim();
+let _reloadTimer = null;
+let _manifest = null;
+
+function showMsg(html, type = 'info') { $('globalMsg').innerHTML = `<div class="msg ${type}">${html}</div>`; }
+function clearMsg() { $('globalMsg').innerHTML = ''; }
+function apiHeaders() {
+  return { 'Authorization': `Bearer ${pat()}`, 'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' };
+}
+
+window.addEventListener('DOMContentLoaded', async () => {
+  $('ghRepo').value   = localStorage.getItem('dr_gh_repo') || '';
+  $('adoOrg').value   = localStorage.getItem('dr_ado_org') || '';
+  $('adoProject').value = localStorage.getItem('dr_ado_project') || '';
+  const saved = localStorage.getItem('dr_gh_pat');
+  if (saved) $('pat').value = saved;
+  updatePatStatus();
+  updateRunsLink();
+  await loadAdoDefaults();
+  await loadManifest();
+});
+
+async function loadAdoDefaults() {
+  if ($('adoOrg').value && $('adoProject').value) return;
+  try {
+    const res = await fetch('./ado-repos-cached.json');
+    if (!res.ok) return;
+    const d = await res.json();
+    if (!$('adoOrg').value     && d.ado_org)     { $('adoOrg').value     = d.ado_org;     localStorage.setItem('dr_ado_org', d.ado_org); }
+    if (!$('adoProject').value && d.ado_project) { $('adoProject').value = d.ado_project; localStorage.setItem('dr_ado_project', d.ado_project); }
+    $('connStatus').textContent = `${d.ado_org} / ${d.ado_project}`;
+    $('connStatus').style.color = 'var(--success)';
+  } catch (_) {}
+}
+
+function saveConfig()    { localStorage.setItem('dr_gh_repo', $('ghRepo').value.trim()); updateRunsLink(); }
+function saveAdoConfig() {
+  localStorage.setItem('dr_ado_org',     $('adoOrg').value.trim());
+  localStorage.setItem('dr_ado_project', $('adoProject').value.trim());
+}
+function scheduleReload() {
+  clearTimeout(_reloadTimer);
+  _reloadTimer = setTimeout(loadManifest, 600);
+}
+
+function updateRunsLink() {
+  const gh = ghRepo();
+  const link = $('ghRunsLink');
+  link.href = gh ? `https://github.com/${gh}/actions/workflows/dr-backup-config.yml` : '#';
+  link.style.opacity = gh ? '1' : '.5';
+}
+
+async function loadManifest() {
+  const org     = $('adoOrg').value.trim();
+  const project = $('adoProject').value.trim();
+  if (!org || !project) {
+    $('componentTable').innerHTML = '<p class="empty">Enter ADO Org and Project above to load backup status.</p>';
+    return;
+  }
+  $('componentTable').innerHTML = '<p class="empty"><span class="spinner"></span>&nbsp;Loading backup manifest&hellip;</p>';
+  try {
+    const url = `./dr-config-backup/${encodeURIComponent(org)}/${encodeURIComponent(project)}/backup-manifest.json`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(res.status);
+    _manifest = await res.json();
+    renderManifest(_manifest);
+    await loadWikiRepos(org, project);
+    renderRawFileLinks(_manifest);
+  } catch (_) {
+    $('statsRow').innerHTML = '';
+    $('componentTable').innerHTML = '<div class="msg warning">No backup manifest found for <strong>' + org + ' / ' + project + '</strong>.<br>Click <strong>&#128190; Run Backup Now</strong> to create the first backup.</div>';
+    $('wikiCard').style.display = 'none';
+    $('rawFilesCard').style.display = 'none';
+  }
+}
+
+function renderManifest(m) {
+  const c = m.components;
+  const total = Object.values(c).reduce((s, v) => s + v, 0);
+  const ts = m.backed_up_at ? new Date(m.backed_up_at).toLocaleString() : '—';
+  $('lastBackupTime').textContent = m.backed_up_at ? `Last backup: ${ts}` : '';
+
+  $('statsRow').innerHTML = [
+    { num: total,                  label: 'Total Items' },
+    { num: c.build_pipelines,     label: 'Build Pipelines' },
+    { num: c.release_pipelines,   label: 'Release Pipelines' },
+    { num: c.variable_groups,     label: 'Variable Groups' },
+    { num: c.service_connections, label: 'Service Connections' },
+    { num: c.wiki_repos,          label: 'Wiki Repos' },
+    { num: c.agent_pools,         label: 'Agent Pools' },
+  ].map(s => `<div class="stat-card"><div class="stat-num">${s.num}</div><div class="stat-label">${s.label}</div></div>`).join('');
+
+  const rows = [
+    { label: 'Build Pipelines',     key: 'build_pipelines',     file: 'build-pipelines.json',     note: '' },
+    { label: 'Release Pipelines',   key: 'release_pipelines',   file: 'release-pipelines.json',   note: '' },
+    { label: 'Variable Groups',     key: 'variable_groups',     file: 'variable-groups.json',     note: '&#9888; Secret values masked' },
+    { label: 'Service Connections', key: 'service_connections', file: 'service-connections.json', note: '&#9888; Credentials excluded' },
+    { label: 'Environments',        key: 'environments',        file: 'environments.json',        note: '' },
+    { label: 'Dashboards',          key: 'dashboards',          file: 'dashboards.json',          note: '' },
+    { label: 'Wiki Repos',          key: 'wiki_repos',          file: 'wiki-repos.json',          note: 'Add to repo mirror for content backup' },
+    { label: 'Agent Pools (org)',   key: 'agent_pools',         file: 'agent-pools.json',         note: '' },
+  ].map(r => {
+    const count = c[r.key] || 0;
+    const badge = count > 0
+      ? `<span class="badge-pill badge-success">${count} backed up</span>`
+      : `<span class="badge-pill badge-muted">0</span>`;
+    const ghLink = m.github_repo
+      ? `<a href="https://github.com/${m.github_repo}/blob/main/dr-config-backup/${encodeURIComponent(m.ado_org)}/${encodeURIComponent(m.ado_project)}/${r.file}" target="_blank" rel="noopener" style="font-size:12px;color:var(--primary)">&#128196; View JSON</a>`
+      : '—';
+    return `<tr><td>${r.label}</td><td>${badge}</td><td style="font-size:12px;color:var(--muted)">${r.note}</td><td>${ghLink}</td></tr>`;
+  }).join('');
+
+  $('componentTable').innerHTML = `
+    <p style="font-size:12px;color:var(--muted);margin-bottom:8px">
+      Backed up by <strong>${m.backed_up_by || '—'}</strong> on ${ts}
+      ${m.run_url ? `&mdash; <a href="${m.run_url}" target="_blank" rel="noopener">View run</a>` : ''}
+    </p>
+    <table class="tbl">
+      <thead><tr><th>Component</th><th>Status</th><th>Notes</th><th>Raw File</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+
+async function loadWikiRepos(org, project) {
+  try {
+    const url = `./dr-config-backup/${encodeURIComponent(org)}/${encodeURIComponent(project)}/wiki-repos.json`;
+    const res = await fetch(url);
+    if (!res.ok) { $('wikiCard').style.display = 'none'; return; }
+    const data = await res.json();
+    const wikis = data.value || [];
+    if (!wikis.length) { $('wikiCard').style.display = 'none'; return; }
+    $('wikiCard').style.display = '';
+    const rows = wikis.map(w => {
+      const cloneUrl = w.remoteUrl || `https://dev.azure.com/${org}/${project}/_git/${w.name}`;
+      return `<tr>
+        <td><strong>${w.name}</strong></td>
+        <td><span class="badge-pill badge-primary">${w.type || 'wiki'}</span></td>
+        <td><code style="font-size:11px">${cloneUrl}</code></td>
+        <td>
+          <a href="repos.html" class="btn btn-outline btn-sm" style="font-size:11px">+ Add to Mirror</a>
+        </td>
+      </tr>`;
+    }).join('');
+    $('wikiTable').innerHTML = `
+      <table class="tbl">
+        <thead><tr><th>Wiki Name</th><th>Type</th><th>Clone URL</th><th>Action</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`;
+  } catch (_) { $('wikiCard').style.display = 'none'; }
+}
+
+function renderRawFileLinks(m) {
+  if (!m.github_repo) { $('rawFilesCard').style.display = 'none'; return; }
+  $('rawFilesCard').style.display = '';
+  const files = ['build-pipelines','release-pipelines','variable-groups','service-connections','environments','dashboards','wiki-repos','agent-pools'];
+  const base = `https://github.com/${m.github_repo}/blob/main/dr-config-backup/${encodeURIComponent(m.ado_org)}/${encodeURIComponent(m.ado_project)}`;
+  $('rawFileLinks').innerHTML = files.map(f =>
+    `<a href="${base}/${f}.json" target="_blank" rel="noopener" class="tag" style="text-decoration:none">&#128196; ${f}.json</a>`
+  ).join('');
+}
+
+function togglePat() { $('patDrawer').classList.toggle('hidden'); }
+function onPatInput() {
+  const val = $('pat').value.trim();
+  if (val) { localStorage.setItem('dr_gh_pat', val); updatePatStatus(); }
+}
+function clearPat() {
+  localStorage.removeItem('dr_gh_pat'); $('pat').value = ''; updatePatStatus();
+  showMsg('PAT removed.', 'info');
+}
+function updatePatStatus() {
+  const el = $('patStatus');
+  if (pat()) { el.textContent = '✓ PAT saved.'; el.className = 'pat-status ok'; }
+  else { el.textContent = 'No PAT saved.'; el.className = 'pat-status none'; }
+}
+
+async function triggerBackup() {
+  const org     = $('adoOrg').value.trim();
+  const project = $('adoProject').value.trim();
+  if (!org)     { showMsg('Enter an ADO Organization.', 'error'); return; }
+  if (!project) { showMsg('Enter an ADO Project.', 'error'); return; }
+  if (!ghRepo()) { showMsg('Set the GitHub Repository.', 'error'); return; }
+  if (!pat()) {
+    $('patDrawer').classList.remove('hidden');
+    $('pat').focus();
+    showMsg('Enter your GitHub PAT to trigger the backup workflow.', 'info');
+    return;
+  }
+  showMsg('<span class="spinner"></span>&nbsp;Triggering config backup workflow&hellip;');
+  try {
+    const res = await fetch(`https://api.github.com/repos/${ghRepo()}/actions/workflows/dr-backup-config.yml/dispatches`,
+      { method: 'POST', headers: { ...apiHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ref: 'main', inputs: { ado_org: org, ado_project: project } }) });
+    if (res.status === 204) {
+      showMsg(`Backup triggered &#10003; for <strong>${org} / ${project}</strong><br>
+        Wait ~2 minutes, then click <strong>&#8635; Refresh</strong> to see the updated summary.<br>
+        <a href="${ghRepo() ? `https://github.com/${ghRepo()}/actions/workflows/dr-backup-config.yml` : '#'}" target="_blank" rel="noopener">
+          &#128279; Monitor the workflow run
+        </a>`, 'success');
+    } else throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+  } catch (e) { showMsg(`Backup trigger failed: ${e.message}`, 'error'); }
+}
+</script>
+</body>
+</html>

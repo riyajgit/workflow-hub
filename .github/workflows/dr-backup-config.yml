@@ -1,0 +1,338 @@
+name: DR - Backup ADO Configuration
+
+# PURPOSE: Exports non-repo Azure DevOps project components to versioned JSON files.
+#          Captures classic pipelines, release pipelines, variable groups,
+#          service connections, environments, dashboards, wiki repos, and agent pools.
+#
+# NOTE ON SECRETS: ADO masks secret variable values and service connection credentials
+#          by design — they will NOT appear in the exported JSON. This is expected.
+#
+# OUTPUT:
+#   dr-config-backup/{org}/{project}/*.json   ← full exports (repo root, not web-exposed)
+#   docs/dr-config-backup/{org}/{project}/    ← manifest + wiki list for portal display
+#
+# SCHEDULED: Daily at 18:30 UTC (30 min after dr-mirror.yml finishes)
+# MANUAL:    workflow_dispatch — specify ado_org and ado_project to target any project
+
+on:
+  schedule:
+    - cron: '30 18 * * *'
+  workflow_dispatch:
+    inputs:
+      ado_org:
+        description: Azure DevOps organization name (leave blank to use repos.json)
+        required: false
+        default: ''
+        type: string
+      ado_project:
+        description: Azure DevOps project name (leave blank to use repos.json)
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: dr-backup-config
+  cancel-in-progress: false   # Never cancel an in-progress backup
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate secrets
+        env:
+          ADO_PAT: ${{ secrets.ADO_PAT }}
+        run: |
+          if [ -z "$ADO_PAT" ]; then
+            echo "ERROR: ADO_PAT secret is missing."
+            echo "Add it at: Settings → Secrets → Actions → ADO_PAT"
+            exit 1
+          fi
+          echo "ADO_PAT present."
+
+      - name: Resolve ADO org and project
+        env:
+          INPUT_ORG:     ${{ github.event.inputs.ado_org }}
+          INPUT_PROJECT: ${{ github.event.inputs.ado_project }}
+        run: |
+          if [ -n "$INPUT_ORG" ] && [ -n "$INPUT_PROJECT" ]; then
+            ADO_ORG="$INPUT_ORG"
+            ADO_PROJECT="$INPUT_PROJECT"
+            echo "Source: workflow_dispatch inputs."
+          elif [ -f "repos.json" ]; then
+            ADO_ORG=$(jq -r 'map(select(.ado_org != null)) | .[0].ado_org // empty' repos.json)
+            ADO_PROJECT=$(jq -r 'map(select(.ado_project != null)) | .[0].ado_project // empty' repos.json)
+            echo "Source: repos.json (first entry)."
+          fi
+
+          if [ -z "$ADO_ORG" ] || [ -z "$ADO_PROJECT" ]; then
+            echo "ERROR: Cannot determine ADO org/project."
+            echo "Provide ado_org + ado_project inputs, or ensure repos.json has at least one entry."
+            exit 1
+          fi
+
+          echo "Target: $ADO_ORG / $ADO_PROJECT"
+          echo "ADO_ORG=$ADO_ORG"         >> "$GITHUB_ENV"
+          echo "ADO_PROJECT=$ADO_PROJECT" >> "$GITHUB_ENV"
+
+      - name: URL-encode org and project for API URLs
+        run: |
+          ORG_ENC=$(python3 -c "import urllib.parse, os; print(urllib.parse.quote(os.environ['ADO_ORG'], safe=''))")
+          PROJ_ENC=$(python3 -c "import urllib.parse, os; print(urllib.parse.quote(os.environ['ADO_PROJECT'], safe=''))")
+          echo "ADO_ORG_ENC=$ORG_ENC"     >> "$GITHUB_ENV"
+          echo "ADO_PROJECT_ENC=$PROJ_ENC" >> "$GITHUB_ENV"
+          echo "Encoded: '$ADO_ORG' → '$ORG_ENC' / '$ADO_PROJECT' → '$PROJ_ENC'"
+
+      - name: Create backup directories
+        run: |
+          BACKUP_DIR="dr-config-backup/$ADO_ORG/$ADO_PROJECT"
+          DOCS_DIR="docs/dr-config-backup/$ADO_ORG/$ADO_PROJECT"
+          mkdir -p "$BACKUP_DIR" "$DOCS_DIR"
+          echo "BACKUP_DIR=$BACKUP_DIR" >> "$GITHUB_ENV"
+          echo "DOCS_DIR=$DOCS_DIR"     >> "$GITHUB_ENV"
+          echo "Backup dir : $BACKUP_DIR"
+          echo "Portal dir : $DOCS_DIR"
+
+      # ── Component exports ─────────────────────────────────────────────────
+      # Each step saves raw JSON and sets a *_COUNT env var for the manifest.
+      # Non-200 responses are treated as "0 items" (project may not use that feature).
+
+      - name: Export build pipeline definitions
+        env:
+          ADO_PAT: ${{ secrets.ADO_PAT }}
+        run: |
+          HTTP=$(curl -sS -w "%{http_code}" -o "$BACKUP_DIR/build-pipelines.json" \
+            -u ":$ADO_PAT" \
+            "https://dev.azure.com/$ADO_ORG_ENC/$ADO_PROJECT_ENC/_apis/build/definitions?api-version=7.1&includeAllProperties=true")
+          if [ "$HTTP" = "200" ]; then
+            COUNT=$(jq '.count // (.value | length) // 0' "$BACKUP_DIR/build-pipelines.json")
+            echo "Build pipelines: $COUNT"
+          else
+            echo "WARNING: HTTP $HTTP for build definitions — saving empty result"
+            echo '{"value":[],"count":0}' > "$BACKUP_DIR/build-pipelines.json"
+            COUNT=0
+          fi
+          echo "BUILD_PIPELINE_COUNT=$COUNT" >> "$GITHUB_ENV"
+
+      - name: Export release pipeline definitions
+        env:
+          ADO_PAT: ${{ secrets.ADO_PAT }}
+        run: |
+          # Release API uses vsrm.dev.azure.com (different subdomain from the rest)
+          HTTP=$(curl -sS -w "%{http_code}" -o "$BACKUP_DIR/release-pipelines.json" \
+            -u ":$ADO_PAT" \
+            "https://vsrm.dev.azure.com/$ADO_ORG_ENC/$ADO_PROJECT_ENC/_apis/release/definitions?api-version=7.1&\$expand=all")
+          if [ "$HTTP" = "200" ]; then
+            COUNT=$(jq '.count // (.value | length) // 0' "$BACKUP_DIR/release-pipelines.json")
+            echo "Release pipelines: $COUNT"
+          else
+            echo "WARNING: HTTP $HTTP for release definitions — saving empty result"
+            echo '{"value":[],"count":0}' > "$BACKUP_DIR/release-pipelines.json"
+            COUNT=0
+          fi
+          echo "RELEASE_PIPELINE_COUNT=$COUNT" >> "$GITHUB_ENV"
+
+      - name: Export variable groups
+        env:
+          ADO_PAT: ${{ secrets.ADO_PAT }}
+        run: |
+          HTTP=$(curl -sS -w "%{http_code}" -o "$BACKUP_DIR/variable-groups.json" \
+            -u ":$ADO_PAT" \
+            "https://dev.azure.com/$ADO_ORG_ENC/$ADO_PROJECT_ENC/_apis/distributedtask/variablegroups?api-version=7.1")
+          if [ "$HTTP" = "200" ]; then
+            COUNT=$(jq '.count // (.value | length) // 0' "$BACKUP_DIR/variable-groups.json")
+            echo "Variable groups: $COUNT (secret values masked by ADO — expected)"
+          else
+            echo "WARNING: HTTP $HTTP for variable groups"
+            echo '{"value":[],"count":0}' > "$BACKUP_DIR/variable-groups.json"
+            COUNT=0
+          fi
+          echo "VARIABLE_GROUP_COUNT=$COUNT" >> "$GITHUB_ENV"
+
+      - name: Export service connections
+        env:
+          ADO_PAT: ${{ secrets.ADO_PAT }}
+        run: |
+          HTTP=$(curl -sS -w "%{http_code}" -o "$BACKUP_DIR/service-connections.json" \
+            -u ":$ADO_PAT" \
+            "https://dev.azure.com/$ADO_ORG_ENC/$ADO_PROJECT_ENC/_apis/serviceendpoint/endpoints?api-version=7.1")
+          if [ "$HTTP" = "200" ]; then
+            COUNT=$(jq '.count // (.value | length) // 0' "$BACKUP_DIR/service-connections.json")
+            echo "Service connections: $COUNT (credentials excluded by ADO)"
+          else
+            echo "WARNING: HTTP $HTTP for service connections"
+            echo '{"value":[],"count":0}' > "$BACKUP_DIR/service-connections.json"
+            COUNT=0
+          fi
+          echo "SERVICE_CONNECTION_COUNT=$COUNT" >> "$GITHUB_ENV"
+
+      - name: Export environments
+        env:
+          ADO_PAT: ${{ secrets.ADO_PAT }}
+        run: |
+          HTTP=$(curl -sS -w "%{http_code}" -o "$BACKUP_DIR/environments.json" \
+            -u ":$ADO_PAT" \
+            "https://dev.azure.com/$ADO_ORG_ENC/$ADO_PROJECT_ENC/_apis/distributedtask/environments?api-version=7.1")
+          if [ "$HTTP" = "200" ]; then
+            COUNT=$(jq '.count // (.value | length) // 0' "$BACKUP_DIR/environments.json")
+            echo "Environments: $COUNT"
+          else
+            echo "WARNING: HTTP $HTTP for environments"
+            echo '{"value":[],"count":0}' > "$BACKUP_DIR/environments.json"
+            COUNT=0
+          fi
+          echo "ENVIRONMENT_COUNT=$COUNT" >> "$GITHUB_ENV"
+
+      - name: Export dashboards
+        env:
+          ADO_PAT: ${{ secrets.ADO_PAT }}
+        run: |
+          HTTP=$(curl -sS -w "%{http_code}" -o "$BACKUP_DIR/dashboards.json" \
+            -u ":$ADO_PAT" \
+            "https://dev.azure.com/$ADO_ORG_ENC/$ADO_PROJECT_ENC/_apis/dashboard/dashboards?api-version=7.1")
+          if [ "$HTTP" = "200" ]; then
+            COUNT=$(jq '.count // (.value | length) // 0' "$BACKUP_DIR/dashboards.json")
+            echo "Dashboards: $COUNT"
+          else
+            echo "WARNING: HTTP $HTTP for dashboards"
+            echo '{"value":[],"count":0}' > "$BACKUP_DIR/dashboards.json"
+            COUNT=0
+          fi
+          echo "DASHBOARD_COUNT=$COUNT" >> "$GITHUB_ENV"
+
+      - name: Export wiki repos
+        env:
+          ADO_PAT: ${{ secrets.ADO_PAT }}
+        run: |
+          HTTP=$(curl -sS -w "%{http_code}" -o "$BACKUP_DIR/wiki-repos.json" \
+            -u ":$ADO_PAT" \
+            "https://dev.azure.com/$ADO_ORG_ENC/$ADO_PROJECT_ENC/_apis/wiki/wikis?api-version=7.1")
+          if [ "$HTTP" = "200" ]; then
+            COUNT=$(jq '.count // (.value | length) // 0' "$BACKUP_DIR/wiki-repos.json")
+            echo "Wiki repos: $COUNT"
+            if [ "$COUNT" -gt 0 ]; then
+              echo "Wikis found:"
+              jq -r '.value[] | "  - " + .name + " (" + .type + ")"' "$BACKUP_DIR/wiki-repos.json"
+            fi
+          else
+            echo "WARNING: HTTP $HTTP for wiki repos"
+            echo '{"value":[],"count":0}' > "$BACKUP_DIR/wiki-repos.json"
+            COUNT=0
+          fi
+          echo "WIKI_COUNT=$COUNT" >> "$GITHUB_ENV"
+
+      - name: Export agent pools (org-level)
+        env:
+          ADO_PAT: ${{ secrets.ADO_PAT }}
+        run: |
+          # Agent pools are org-scoped — no project segment in the URL
+          HTTP=$(curl -sS -w "%{http_code}" -o "$BACKUP_DIR/agent-pools.json" \
+            -u ":$ADO_PAT" \
+            "https://dev.azure.com/$ADO_ORG_ENC/_apis/distributedtask/pools?api-version=7.1")
+          if [ "$HTTP" = "200" ]; then
+            COUNT=$(jq '.count // (.value | length) // 0' "$BACKUP_DIR/agent-pools.json")
+            echo "Agent pools: $COUNT"
+            jq -r '.value[] | "  - " + .name + " (" + .poolType + ")"' "$BACKUP_DIR/agent-pools.json"
+          else
+            echo "WARNING: HTTP $HTTP for agent pools"
+            echo '{"value":[],"count":0}' > "$BACKUP_DIR/agent-pools.json"
+            COUNT=0
+          fi
+          echo "AGENT_POOL_COUNT=$COUNT" >> "$GITHUB_ENV"
+
+      # ── Manifest + portal files ───────────────────────────────────────────
+
+      - name: Write backup manifest
+        run: |
+          BACKED_AT=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+          GH_RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          jq -n \
+            --arg org                "$ADO_ORG" \
+            --arg project            "$ADO_PROJECT" \
+            --arg ts                 "$BACKED_AT" \
+            --arg actor              "${{ github.actor }}" \
+            --arg gh_repo            "${{ github.repository }}" \
+            --arg run_url            "$GH_RUN_URL" \
+            --argjson build_pipelines     "$BUILD_PIPELINE_COUNT" \
+            --argjson release_pipelines   "$RELEASE_PIPELINE_COUNT" \
+            --argjson variable_groups     "$VARIABLE_GROUP_COUNT" \
+            --argjson service_connections "$SERVICE_CONNECTION_COUNT" \
+            --argjson environments        "$ENVIRONMENT_COUNT" \
+            --argjson dashboards          "$DASHBOARD_COUNT" \
+            --argjson wiki_repos          "$WIKI_COUNT" \
+            --argjson agent_pools         "$AGENT_POOL_COUNT" \
+            '{
+              ado_org:     $org,
+              ado_project: $project,
+              backed_up_at: $ts,
+              backed_up_by: $actor,
+              github_repo:  $gh_repo,
+              run_url:      $run_url,
+              components: {
+                build_pipelines:     $build_pipelines,
+                release_pipelines:   $release_pipelines,
+                variable_groups:     $variable_groups,
+                service_connections: $service_connections,
+                environments:        $environments,
+                dashboards:          $dashboards,
+                wiki_repos:          $wiki_repos,
+                agent_pools:         $agent_pools
+              }
+            }' > "$DOCS_DIR/backup-manifest.json"
+
+          # Copy wiki-repos.json to docs/ so portal can display wiki names
+          # (wiki names are not sensitive — anyone with ADO access knows them)
+          cp "$BACKUP_DIR/wiki-repos.json" "$DOCS_DIR/wiki-repos.json"
+
+          echo "Manifest written."
+          cat "$DOCS_DIR/backup-manifest.json"
+
+      - name: Write step summary
+        run: |
+          TOTAL=$((BUILD_PIPELINE_COUNT + RELEASE_PIPELINE_COUNT + VARIABLE_GROUP_COUNT + SERVICE_CONNECTION_COUNT + ENVIRONMENT_COUNT + DASHBOARD_COUNT + WIKI_COUNT + AGENT_POOL_COUNT))
+          {
+            echo "## DR Config Backup — $(date -u '+%Y-%m-%d %H:%M UTC')"
+            echo "**Org:** \`$ADO_ORG\` | **Project:** \`$ADO_PROJECT\` | **Total items:** $TOTAL"
+            echo ""
+            echo "| Component | Backed Up | Notes |"
+            echo "|-----------|:---------:|-------|"
+            echo "| Build Pipelines | **$BUILD_PIPELINE_COUNT** | Classic + YAML pipeline settings |"
+            echo "| Release Pipelines | **$RELEASE_PIPELINE_COUNT** | |"
+            echo "| Variable Groups | **$VARIABLE_GROUP_COUNT** | ⚠️ Secret values masked by ADO |"
+            echo "| Service Connections | **$SERVICE_CONNECTION_COUNT** | ⚠️ Credentials excluded by ADO |"
+            echo "| Environments | **$ENVIRONMENT_COUNT** | |"
+            echo "| Dashboards | **$DASHBOARD_COUNT** | |"
+            echo "| Wiki Repos | **$WIKI_COUNT** | Add to repo mirror if needed |"
+            echo "| Agent Pools (org) | **$AGENT_POOL_COUNT** | |"
+            echo ""
+            echo "**Files:** \`dr-config-backup/$ADO_ORG/$ADO_PROJECT/\`"
+            echo ""
+            if [ "$WIKI_COUNT" -gt "0" ]; then
+              echo "### Wiki Repos Discovered"
+              echo "These are backed by Git — add them to the repo mirror via the Repositories page."
+              echo ""
+              jq -r '.value[] | "| `" + .name + "` | " + .type + " | `https://dev.azure.com/$ADO_ORG/$ADO_PROJECT/_git/" + .name + "` |"' "$BACKUP_DIR/wiki-repos.json" | \
+                { echo "| Name | Type | Clone URL |"; echo "|------|------|-----------|"; cat; }
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Commit and push backup files
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "dr-config-backup/" "docs/dr-config-backup/"
+          if git diff --cached --quiet; then
+            echo "No changes to configuration backup — nothing to commit."
+          else
+            git commit -m "chore(dr): backup ADO config — $ADO_ORG/$ADO_PROJECT [${{ github.actor }}]"
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+            echo "Configuration backup committed and pushed."
+          fi
