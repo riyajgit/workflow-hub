@@ -170,6 +170,12 @@ jobs:
           check_scope "Agent Pools (Read)"     \
             "https://dev.azure.com/$ADO_ORG_ENC/_apis/distributedtask/pools?api-version=7.1" \
             /tmp/pf-pools.json
+          check_scope "Branch Policies (Read)" \
+            "https://dev.azure.com/$ADO_ORG_ENC/$ADO_PROJECT_ENC/_apis/policy/configurations?api-version=7.1&\$top=1" \
+            /tmp/pf-policy.json
+          check_scope "Work Item Types (Read)" \
+            "https://dev.azure.com/$ADO_ORG_ENC/$ADO_PROJECT_ENC/_apis/wit/workitemtypes?api-version=7.1" \
+            /tmp/pf-wit.json
 
           echo ""
           if [ "$FAIL" = "1" ]; then
@@ -180,10 +186,10 @@ jobs:
             echo "  • Variable Groups — Read, create, & manage"
             echo "  • Service Connections — Read, query, & manage"
             echo "  • Environments — Read & manage"
-            echo "  • Work Items — Read  (needed for dashboards)"
+            echo "  • Work Items — Read  (needed for dashboards + work items backup)"
             echo "  • Wiki — Read & write"
             echo "  • Agent Pools — Read"
-            echo "  • Code — Read  (for wiki content clone)"
+            echo "  • Code — Read  (for wiki content clone + branch policies)"
             echo "Then update the ADO_PAT secret in GitHub Settings → Secrets → Actions."
             exit 1
           fi
@@ -305,6 +311,99 @@ jobs:
             COUNT=0
           fi
           echo "DASHBOARD_COUNT=$COUNT" >> "$GITHUB_ENV"
+
+      - name: Export branch policies
+        env:
+          ADO_PAT: ${{ secrets.ADO_PAT }}
+        run: |
+          HTTP=$(curl -sS -w "%{http_code}" -o "$BACKUP_DIR/branch-policies.json" \
+            -u ":$ADO_PAT" \
+            "https://dev.azure.com/$ADO_ORG_ENC/$ADO_PROJECT_ENC/_apis/policy/configurations?api-version=7.1")
+          if [ "$HTTP" = "200" ]; then
+            COUNT=$(jq '.count // (.value | length) // 0' "$BACKUP_DIR/branch-policies.json")
+            echo "Branch policies: $COUNT"
+            if [ "$COUNT" -gt 0 ]; then
+              jq -r '.value[] | "  - [" + (.type.displayName // .type.id) + "]"' \
+                "$BACKUP_DIR/branch-policies.json" 2>/dev/null | sort -u | head -20
+            fi
+          else
+            echo "::warning::Branch policies API returned HTTP $HTTP — response: $(head -c 300 \"$BACKUP_DIR/branch-policies.json\")"
+            echo '{"value":[],"count":0}' > "$BACKUP_DIR/branch-policies.json"
+            COUNT=0
+          fi
+          echo "BRANCH_POLICY_COUNT=$COUNT" >> "$GITHUB_ENV"
+
+      - name: Export work items
+        env:
+          ADO_PAT: ${{ secrets.ADO_PAT }}
+        run: |
+          # Step 1: Get all work item IDs via WIQL
+          WIQL_HTTP=$(curl -sS -w "%{http_code}" -o /tmp/wi-ids.json \
+            -X POST \
+            -H "Content-Type: application/json" \
+            -u ":$ADO_PAT" \
+            "https://dev.azure.com/$ADO_ORG_ENC/$ADO_PROJECT_ENC/_apis/wit/wiql?api-version=7.1" \
+            -d '{"query":"SELECT [System.Id] FROM WorkItems ORDER BY [System.Id] ASC"}')
+          if [ "$WIQL_HTTP" != "200" ]; then
+            echo "::warning::Work items WIQL returned HTTP $WIQL_HTTP — skipping work items export"
+            echo '{"count":0,"value":[]}' > "$BACKUP_DIR/work-items.json"
+            echo "WORK_ITEM_COUNT=0" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+          TOTAL=$(jq '.workItems | length' /tmp/wi-ids.json)
+          echo "Work items found: $TOTAL"
+
+          if [ "$TOTAL" -eq 0 ]; then
+            echo '{"count":0,"value":[]}' > "$BACKUP_DIR/work-items.json"
+            echo "WORK_ITEM_COUNT=0" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+          [ "$TOTAL" -gt 5000 ] && echo "::warning::Large work item set ($TOTAL items) — backup may take several minutes."
+
+          # Step 2: Batch fetch work item details in groups of 200 (API max per call).
+          # Uses temp file accumulation to avoid shell variable size limits.
+          BATCH_SIZE=200
+          OFFSET=0
+          echo "[]" > /tmp/wi-accumulated.json
+
+          while [ "$OFFSET" -lt "$TOTAL" ]; do
+            BATCH_IDS=$(jq --argjson o "$OFFSET" --argjson s "$BATCH_SIZE" \
+              '[.workItems[$o:$o+$s][].id]' /tmp/wi-ids.json)
+            BATCH_PAYLOAD=$(jq -cn \
+              --argjson ids "$BATCH_IDS" \
+              '{ids: $ids,
+                fields: ["System.Id","System.Title","System.WorkItemType","System.State",
+                         "System.AssignedTo","System.CreatedDate","System.ChangedDate",
+                         "System.Tags","Microsoft.VSTS.Common.Priority","System.Description",
+                         "System.AreaPath","System.IterationPath"],
+                errorPolicy: "omit"}')
+
+            BATCH_HTTP=$(curl -sS -w "%{http_code}" -o /tmp/wi-batch.json \
+              -X POST \
+              -H "Content-Type: application/json" \
+              -u ":$ADO_PAT" \
+              "https://dev.azure.com/$ADO_ORG_ENC/$ADO_PROJECT_ENC/_apis/wit/workitemsbatch?api-version=7.1" \
+              -d "$BATCH_PAYLOAD")
+
+            if [ "$BATCH_HTTP" = "200" ]; then
+              jq '.value' /tmp/wi-batch.json > /tmp/wi-batch-items.json
+              jq -s 'add' /tmp/wi-accumulated.json /tmp/wi-batch-items.json \
+                > /tmp/wi-accumulated.tmp && mv /tmp/wi-accumulated.tmp /tmp/wi-accumulated.json
+              echo "  Fetched items $OFFSET–$((OFFSET + BATCH_SIZE - 1)) (HTTP 200)"
+            else
+              echo "::warning::Work items batch HTTP $BATCH_HTTP at offset $OFFSET — skipping batch"
+            fi
+            OFFSET=$((OFFSET + BATCH_SIZE))
+          done
+
+          jq -n \
+            --argjson count "$TOTAL" \
+            --slurpfile items /tmp/wi-accumulated.json \
+            '{count: $count, value: $items[0]}' > "$BACKUP_DIR/work-items.json"
+          echo "WORK_ITEM_COUNT=$TOTAL" >> "$GITHUB_ENV"
+          echo "Work items export complete: $TOTAL items → $BACKUP_DIR/work-items.json"
 
       - name: Export wiki repos
         env:
@@ -440,6 +539,8 @@ jobs:
             --argjson service_connections "$SERVICE_CONNECTION_COUNT" \
             --argjson environments        "$ENVIRONMENT_COUNT" \
             --argjson dashboards          "$DASHBOARD_COUNT" \
+            --argjson branch_policies     "$BRANCH_POLICY_COUNT" \
+            --argjson work_items          "$WORK_ITEM_COUNT" \
             --argjson wiki_repos          "$WIKI_COUNT" \
             --argjson agent_pools         "$AGENT_POOL_COUNT" \
             '{
@@ -456,6 +557,8 @@ jobs:
                 service_connections: $service_connections,
                 environments:        $environments,
                 dashboards:          $dashboards,
+                branch_policies:     $branch_policies,
+                work_items:          $work_items,
                 wiki_repos:          $wiki_repos,
                 agent_pools:         $agent_pools
               }
@@ -470,7 +573,7 @@ jobs:
 
       - name: Write step summary
         run: |
-          TOTAL=$((BUILD_PIPELINE_COUNT + RELEASE_PIPELINE_COUNT + VARIABLE_GROUP_COUNT + SERVICE_CONNECTION_COUNT + ENVIRONMENT_COUNT + DASHBOARD_COUNT + WIKI_COUNT + AGENT_POOL_COUNT))
+          TOTAL=$((BUILD_PIPELINE_COUNT + RELEASE_PIPELINE_COUNT + VARIABLE_GROUP_COUNT + SERVICE_CONNECTION_COUNT + ENVIRONMENT_COUNT + DASHBOARD_COUNT + BRANCH_POLICY_COUNT + WORK_ITEM_COUNT + WIKI_COUNT + AGENT_POOL_COUNT))
           {
             echo "## DR Config Backup — $(date -u '+%Y-%m-%d %H:%M UTC')"
             echo "**Org:** \`$ADO_ORG\` | **Project:** \`$ADO_PROJECT\` | **Total items:** $TOTAL"
@@ -483,6 +586,8 @@ jobs:
             echo "| Service Connections | **$SERVICE_CONNECTION_COUNT** | ⚠️ Credentials excluded by ADO |"
             echo "| Environments | **$ENVIRONMENT_COUNT** | |"
             echo "| Dashboards | **$DASHBOARD_COUNT** | |"
+            echo "| Branch Policies | **$BRANCH_POLICY_COUNT** | |"
+            echo "| Work Items | **$WORK_ITEM_COUNT** | All types, key fields |"
             echo "| Wiki Repos | **$WIKI_COUNT** | Content mirrored to GitHub |"
             echo "| Agent Pools (org) | **$AGENT_POOL_COUNT** | |"
             echo ""
