@@ -96,6 +96,99 @@ jobs:
           echo "ADO_PROJECT_ENC=$PROJ_ENC" >> "$GITHUB_ENV"
           echo "Encoded: '$ADO_ORG' → '$ORG_ENC' / '$ADO_PROJECT' → '$PROJ_ENC'"
 
+      - name: Pre-flight — verify ADO connectivity and PAT scopes
+        env:
+          ADO_PAT: ${{ secrets.ADO_PAT }}
+        run: |
+          echo "=== ADO pre-flight check: $ADO_ORG / $ADO_PROJECT ==="
+          FAIL=0
+
+          # ── 1. Org reachable? (needs any valid PAT) ────────────────────
+          HTTP=$(curl -sS -w "%{http_code}" -o /tmp/pf-projects.json \
+            -u ":$ADO_PAT" \
+            "https://dev.azure.com/$ADO_ORG_ENC/_apis/projects?api-version=7.1")
+          if [ "$HTTP" != "200" ]; then
+            echo "::error::Cannot reach ADO org '$ADO_ORG' — HTTP $HTTP"
+            echo "         Response: $(head -c 400 /tmp/pf-projects.json)"
+            echo ""
+            echo "Possible causes:"
+            echo "  • ADO_PAT secret is missing, expired, or revoked"
+            echo "  • Organization name '$ADO_ORG' is wrong"
+            echo "  • PAT was created in a different AAD tenant"
+            exit 1
+          fi
+          echo "✓ Org reachable (HTTP 200)"
+
+          # Confirm the project exists in this org
+          PROJECT_FOUND=$(jq -r --arg p "$ADO_PROJECT" '.value[] | select(.name == $p) | .name' /tmp/pf-projects.json)
+          if [ -z "$PROJECT_FOUND" ]; then
+            echo "::error::Project '$ADO_PROJECT' not found in org '$ADO_ORG'."
+            echo "Available projects:"
+            jq -r '.value[].name' /tmp/pf-projects.json | sed 's/^/  - /'
+            exit 1
+          fi
+          echo "✓ Project '$ADO_PROJECT' found"
+
+          # ── 2. Check each required API scope ──────────────────────────
+          check_scope() {
+            local LABEL="$1" URL="$2" FILE="$3"
+            local H
+            H=$(curl -sS -w "%{http_code}" -o "$FILE" -u ":$ADO_PAT" "$URL")
+            if [ "$H" = "200" ]; then
+              echo "✓ $LABEL (HTTP 200)"
+            elif [ "$H" = "401" ] || [ "$H" = "403" ]; then
+              echo "::warning::$LABEL — HTTP $H (PAT missing this scope)"
+              echo "  Response: $(head -c 200 "$FILE")"
+              FAIL=1
+            else
+              echo "::warning::$LABEL — HTTP $H"
+              echo "  Response: $(head -c 200 "$FILE")"
+            fi
+          }
+
+          check_scope "Build (Read)"           \
+            "https://dev.azure.com/$ADO_ORG_ENC/$ADO_PROJECT_ENC/_apis/build/definitions?api-version=7.1&\$top=1" \
+            /tmp/pf-build.json
+          check_scope "Release (Read)"         \
+            "https://vsrm.dev.azure.com/$ADO_ORG_ENC/$ADO_PROJECT_ENC/_apis/release/definitions?api-version=7.1&\$top=1" \
+            /tmp/pf-release.json
+          check_scope "Variable Groups (Read)" \
+            "https://dev.azure.com/$ADO_ORG_ENC/$ADO_PROJECT_ENC/_apis/distributedtask/variablegroups?api-version=7.1&\$top=1" \
+            /tmp/pf-vg.json
+          check_scope "Service Connections (Read)" \
+            "https://dev.azure.com/$ADO_ORG_ENC/$ADO_PROJECT_ENC/_apis/serviceendpoint/endpoints?api-version=7.1&\$top=1" \
+            /tmp/pf-sc.json
+          check_scope "Environments (Read)"    \
+            "https://dev.azure.com/$ADO_ORG_ENC/$ADO_PROJECT_ENC/_apis/distributedtask/environments?api-version=7.1&\$top=1" \
+            /tmp/pf-env.json
+          check_scope "Dashboards (Read)"      \
+            "https://dev.azure.com/$ADO_ORG_ENC/$ADO_PROJECT_ENC/_apis/dashboard/dashboards?api-version=7.1" \
+            /tmp/pf-dash.json
+          check_scope "Wiki (Read)"            \
+            "https://dev.azure.com/$ADO_ORG_ENC/$ADO_PROJECT_ENC/_apis/wiki/wikis?api-version=7.1" \
+            /tmp/pf-wiki.json
+          check_scope "Agent Pools (Read)"     \
+            "https://dev.azure.com/$ADO_ORG_ENC/_apis/distributedtask/pools?api-version=7.1" \
+            /tmp/pf-pools.json
+
+          echo ""
+          if [ "$FAIL" = "1" ]; then
+            echo "::error::One or more required PAT scopes are missing."
+            echo "Create a new ADO PAT with ALL of these scopes:"
+            echo "  • Build — Read"
+            echo "  • Release — Read"
+            echo "  • Variable Groups — Read, create, & manage"
+            echo "  • Service Connections — Read, query, & manage"
+            echo "  • Environments — Read & manage"
+            echo "  • Work Items — Read  (needed for dashboards)"
+            echo "  • Wiki — Read & write"
+            echo "  • Agent Pools — Read"
+            echo "  • Code — Read  (for wiki content clone)"
+            echo "Then update the ADO_PAT secret in GitHub Settings → Secrets → Actions."
+            exit 1
+          fi
+          echo "=== All scope checks passed — proceeding with backup ==="
+
       - name: Create backup directories
         run: |
           BACKUP_DIR="dr-config-backup/$ADO_ORG/$ADO_PROJECT"
@@ -121,7 +214,7 @@ jobs:
             COUNT=$(jq '.count // (.value | length) // 0' "$BACKUP_DIR/build-pipelines.json")
             echo "Build pipelines: $COUNT"
           else
-            echo "WARNING: HTTP $HTTP for build definitions — saving empty result"
+            echo "::warning::Build pipeline API returned HTTP $HTTP — response: $(head -c 300 "$BACKUP_DIR/build-pipelines.json")"
             echo '{"value":[],"count":0}' > "$BACKUP_DIR/build-pipelines.json"
             COUNT=0
           fi
@@ -139,7 +232,7 @@ jobs:
             COUNT=$(jq '.count // (.value | length) // 0' "$BACKUP_DIR/release-pipelines.json")
             echo "Release pipelines: $COUNT"
           else
-            echo "WARNING: HTTP $HTTP for release definitions — saving empty result"
+            echo "::warning::Release pipeline API returned HTTP $HTTP — response: $(head -c 300 "$BACKUP_DIR/release-pipelines.json")"
             echo '{"value":[],"count":0}' > "$BACKUP_DIR/release-pipelines.json"
             COUNT=0
           fi
@@ -156,7 +249,7 @@ jobs:
             COUNT=$(jq '.count // (.value | length) // 0' "$BACKUP_DIR/variable-groups.json")
             echo "Variable groups: $COUNT (secret values masked by ADO — expected)"
           else
-            echo "WARNING: HTTP $HTTP for variable groups"
+            echo "::warning::Variable groups API returned HTTP $HTTP — response: $(head -c 300 "$BACKUP_DIR/variable-groups.json")"
             echo '{"value":[],"count":0}' > "$BACKUP_DIR/variable-groups.json"
             COUNT=0
           fi
@@ -173,7 +266,7 @@ jobs:
             COUNT=$(jq '.count // (.value | length) // 0' "$BACKUP_DIR/service-connections.json")
             echo "Service connections: $COUNT (credentials excluded by ADO)"
           else
-            echo "WARNING: HTTP $HTTP for service connections"
+            echo "::warning::Service connections API returned HTTP $HTTP — response: $(head -c 300 "$BACKUP_DIR/service-connections.json")"
             echo '{"value":[],"count":0}' > "$BACKUP_DIR/service-connections.json"
             COUNT=0
           fi
@@ -190,7 +283,7 @@ jobs:
             COUNT=$(jq '.count // (.value | length) // 0' "$BACKUP_DIR/environments.json")
             echo "Environments: $COUNT"
           else
-            echo "WARNING: HTTP $HTTP for environments"
+            echo "::warning::Environments API returned HTTP $HTTP — response: $(head -c 300 "$BACKUP_DIR/environments.json")"
             echo '{"value":[],"count":0}' > "$BACKUP_DIR/environments.json"
             COUNT=0
           fi
@@ -207,7 +300,7 @@ jobs:
             COUNT=$(jq '.count // (.value | length) // 0' "$BACKUP_DIR/dashboards.json")
             echo "Dashboards: $COUNT"
           else
-            echo "WARNING: HTTP $HTTP for dashboards"
+            echo "::warning::Dashboards API returned HTTP $HTTP — response: $(head -c 300 "$BACKUP_DIR/dashboards.json")"
             echo '{"value":[],"count":0}' > "$BACKUP_DIR/dashboards.json"
             COUNT=0
           fi
@@ -228,7 +321,7 @@ jobs:
               jq -r '.value[] | "  - " + .name + " (" + .type + ")"' "$BACKUP_DIR/wiki-repos.json"
             fi
           else
-            echo "WARNING: HTTP $HTTP for wiki repos"
+            echo "::warning::Wiki API returned HTTP $HTTP — response: $(head -c 300 "$BACKUP_DIR/wiki-repos.json")"
             echo '{"value":[],"count":0}' > "$BACKUP_DIR/wiki-repos.json"
             COUNT=0
           fi
@@ -321,7 +414,7 @@ jobs:
             echo "Agent pools: $COUNT"
             jq -r '.value[] | "  - " + .name + " (" + .poolType + ")"' "$BACKUP_DIR/agent-pools.json"
           else
-            echo "WARNING: HTTP $HTTP for agent pools"
+            echo "::warning::Agent pools API returned HTTP $HTTP — response: $(head -c 300 "$BACKUP_DIR/agent-pools.json")"
             echo '{"value":[],"count":0}' > "$BACKUP_DIR/agent-pools.json"
             COUNT=0
           fi
