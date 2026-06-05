@@ -1,15 +1,21 @@
 name: DR - Backup ADO Configuration
 
-# PURPOSE: Exports non-repo Azure DevOps project components to versioned JSON files.
+# PURPOSE: Exports non-repo Azure DevOps project components to versioned JSON files
+#          AND mirrors wiki content (Git repos) to private GitHub backup repos.
 #          Captures classic pipelines, release pipelines, variable groups,
-#          service connections, environments, dashboards, wiki repos, and agent pools.
+#          service connections, environments, dashboards, wiki content, and agent pools.
 #
 # NOTE ON SECRETS: ADO masks secret variable values and service connection credentials
 #          by design — they will NOT appear in the exported JSON. This is expected.
 #
+# WIKI CONTENT: ADO wikis are hidden Git repos. This workflow clones each wiki and
+#          pushes it to a private GitHub repo named {wiki-name}_backup.
+#          View backed-up wiki: github.com/{owner}/{wiki-name}_backup
+#
 # OUTPUT:
-#   dr-config-backup/{org}/{project}/*.json   ← full exports (repo root, not web-exposed)
-#   docs/dr-config-backup/{org}/{project}/    ← manifest + wiki list for portal display
+#   dr-config-backup/{org}/{project}/*.json   ← full JSON exports (repo root)
+#   docs/dr-config-backup/{org}/{project}/    ← manifest + wiki list for portal
+#   github.com/{owner}/{wiki-name}_backup     ← full wiki content (Git mirror)
 #
 # SCHEDULED: Daily at 18:30 UTC (30 min after dr-mirror.yml finishes)
 # MANUAL:    workflow_dispatch — specify ado_org and ado_project to target any project
@@ -228,6 +234,80 @@ jobs:
           fi
           echo "WIKI_COUNT=$COUNT" >> "$GITHUB_ENV"
 
+      - name: Mirror wiki content to GitHub backup repos
+        # ADO wikis are Git repos — clone each one and push to a private GitHub backup repo.
+        # Content is stored at: github.com/{owner}/{wiki-name}_backup
+        env:
+          ADO_PAT:  ${{ secrets.ADO_PAT }}
+          GH_PAT:   ${{ secrets.GH_PAT }}
+          GH_TOKEN: ${{ secrets.GH_PAT }}   # needed by the gh CLI
+        run: |
+          WIKI_COUNT_VAL=$(jq '.value | length' "$BACKUP_DIR/wiki-repos.json" 2>/dev/null || echo 0)
+          if [ "$WIKI_COUNT_VAL" -eq 0 ]; then
+            echo "No wikis to mirror — skipping."
+            exit 0
+          fi
+
+          if [ -z "$GH_PAT" ]; then
+            echo "WARNING: GH_PAT secret not set."
+            echo "Wiki metadata has been saved, but content cannot be mirrored without GH_PAT."
+            echo "Add GH_PAT (with repo + workflow scopes) to enable full wiki content backup."
+            exit 0
+          fi
+
+          GH_OWNER="${{ github.repository_owner }}"
+          echo "Mirroring $WIKI_COUNT_VAL wiki repo(s) to github.com/$GH_OWNER ..."
+          WIKI_MIRROR_RESULTS=""
+
+          while IFS= read -r WIKI_NAME; do
+            REMOTE_URL=$(jq -r --arg n "$WIKI_NAME" \
+              '.value[] | select(.name == $n) | .remoteUrl' \
+              "$BACKUP_DIR/wiki-repos.json")
+            WIKI_TYPE=$(jq -r --arg n "$WIKI_NAME" \
+              '.value[] | select(.name == $n) | .type' \
+              "$BACKUP_DIR/wiki-repos.json")
+
+            # Inject ADO PAT into the clone URL for auth
+            ADO_CLONE_URL="https://:${ADO_PAT}@${REMOTE_URL#https://}"
+
+            # GitHub backup repo name: ProjectName.wiki → ProjectName.wiki_backup
+            BACKUP_REPO="${WIKI_NAME}_backup"
+
+            echo ""
+            echo "── $WIKI_NAME ($WIKI_TYPE) ──"
+            echo "   Source : $REMOTE_URL"
+            echo "   Target : github.com/$GH_OWNER/$BACKUP_REPO"
+
+            # Create GitHub backup repo if it does not already exist
+            gh repo create "$GH_OWNER/$BACKUP_REPO" \
+              --private \
+              --description "DR wiki backup — ADO: $ADO_ORG/$ADO_PROJECT/$WIKI_NAME" \
+            && echo "   Created GitHub repo." \
+            || echo "   Repo already exists — syncing."
+
+            # Clone wiki as a bare mirror from ADO
+            CLONE_DIR="wiki-clone-$(echo "$WIKI_NAME" | tr '/' '-' | tr ' ' '_')"
+            if git clone --mirror "$ADO_CLONE_URL" "$CLONE_DIR" 2>/dev/null; then
+              # Push all branches and tags to GitHub backup
+              git -C "$CLONE_DIR" push --force \
+                "https://x-access-token:$GH_PAT@github.com/$GH_OWNER/${BACKUP_REPO}.git" \
+                '+refs/heads/*:refs/heads/*' \
+                '+refs/tags/*:refs/tags/*'
+              echo "   ✓ Content mirrored → github.com/$GH_OWNER/$BACKUP_REPO"
+              WIKI_MIRROR_RESULTS="$WIKI_MIRROR_RESULTS\n✅ $WIKI_NAME → $BACKUP_REPO"
+            else
+              echo "   ✗ Clone failed for $WIKI_NAME (may be empty or inaccessible)"
+              WIKI_MIRROR_RESULTS="$WIKI_MIRROR_RESULTS\n⚠️ $WIKI_NAME — clone failed (empty wiki?)"
+            fi
+          done < <(jq -r '.value[].name' "$BACKUP_DIR/wiki-repos.json")
+
+          echo ""
+          echo "Wiki mirror summary:"
+          echo -e "$WIKI_MIRROR_RESULTS"
+          echo "WIKI_MIRROR_RESULTS<<EOF" >> "$GITHUB_ENV"
+          echo -e "$WIKI_MIRROR_RESULTS"  >> "$GITHUB_ENV"
+          echo "EOF"                       >> "$GITHUB_ENV"
+
       - name: Export agent pools (org-level)
         env:
           ADO_PAT: ${{ secrets.ADO_PAT }}
@@ -310,17 +390,17 @@ jobs:
             echo "| Service Connections | **$SERVICE_CONNECTION_COUNT** | ⚠️ Credentials excluded by ADO |"
             echo "| Environments | **$ENVIRONMENT_COUNT** | |"
             echo "| Dashboards | **$DASHBOARD_COUNT** | |"
-            echo "| Wiki Repos | **$WIKI_COUNT** | Add to repo mirror if needed |"
+            echo "| Wiki Repos | **$WIKI_COUNT** | Content mirrored to GitHub |"
             echo "| Agent Pools (org) | **$AGENT_POOL_COUNT** | |"
             echo ""
             echo "**Files:** \`dr-config-backup/$ADO_ORG/$ADO_PROJECT/\`"
             echo ""
             if [ "$WIKI_COUNT" -gt "0" ]; then
-              echo "### Wiki Repos Discovered"
-              echo "These are backed by Git — add them to the repo mirror via the Repositories page."
+              echo "### Wiki Content Mirror"
+              echo "Each wiki is backed up as a private GitHub repo named \`{wiki-name}_backup\`."
               echo ""
-              jq -r '.value[] | "| `" + .name + "` | " + .type + " | `https://dev.azure.com/$ADO_ORG/$ADO_PROJECT/_git/" + .name + "` |"' "$BACKUP_DIR/wiki-repos.json" | \
-                { echo "| Name | Type | Clone URL |"; echo "|------|------|-----------|"; cat; }
+              echo -e "$WIKI_MIRROR_RESULTS"
+              echo ""
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 

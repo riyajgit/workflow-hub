@@ -287,13 +287,16 @@ async function loadWikiRepos(org, project) {
     $('wikiCard').style.display = '';
     const rows = wikis.map(w => {
       const cloneUrl = w.remoteUrl || `https://dev.azure.com/${org}/${project}/_git/${w.name}`;
+      const ghOwner = (localStorage.getItem('dr_gh_repo') || '').split('/')[0] || '';
+      const ghBackupUrl = ghOwner ? `https://github.com/${ghOwner}/${w.name}_backup` : null;
+      const ghLink = ghBackupUrl
+        ? `<a href="${ghBackupUrl}" target="_blank" rel="noopener" class="btn btn-success btn-sm" style="font-size:11px">&#128214; View Backup on GitHub</a>`
+        : `<a href="repos.html" class="btn btn-outline btn-sm" style="font-size:11px">+ Add to Mirror</a>`;
       return `<tr>
         <td><strong>${w.name}</strong></td>
         <td><span class="badge-pill badge-primary">${w.type || 'wiki'}</span></td>
         <td><code style="font-size:11px">${cloneUrl}</code></td>
-        <td>
-          <a href="repos.html" class="btn btn-outline btn-sm" style="font-size:11px">+ Add to Mirror</a>
-        </td>
+        <td>${ghLink}</td>
       </tr>`;
     }).join('');
     $('wikiTable').innerHTML = `
