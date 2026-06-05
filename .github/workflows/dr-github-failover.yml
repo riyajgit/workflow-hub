@@ -1,0 +1,357 @@
+name: DR - Activate GitHub Failover Repos
+
+# PURPOSE: Promotes the daily _backup mirror repos into usable GitHub repos
+#          with the ORIGINAL ADO repo names (no suffix). Run this when ADO is
+#          unavailable (cyber attack, outage) or to pre-provision GitHub repos
+#          so your team can deploy directly from GitHub without ADO.
+#
+#          Source: github.com/{this_owner}/{ado_repo}_backup  (daily mirror)
+#          Target: github.com/{target_owner}/{ado_repo}       (ready-to-use)
+#
+# KEY DIFFERENCE FROM RESTORE DRILL:
+#   dr-restore-drill.yml — adds a suffix (_dr_restore), targets ADO by default,
+#                          used to TEST that backups are restorable.
+#   THIS WORKFLOW         — uses the REAL repo name, targets GitHub only,
+#                          creates repos your team can actually deploy from.
+#
+# USAGE:
+#   1. Run workflow_dispatch — choose repos, target owner, and force_sync option.
+#   2. Target repos appear at github.com/{target_owner}/{ado_repo}.
+#   3. Update your deploy pipelines to point at the new GitHub remote and run.
+#   4. Re-run with force_sync=true at any time to pull in the latest backup.
+#
+# NOTE: Requires GH_PAT with 'repo' and 'workflow' scopes on the target owner.
+
+on:
+  workflow_dispatch:
+    inputs:
+      repos_to_activate:
+        description: |
+          Comma-separated ado_repo names to activate, or 'all' for every enabled
+          repo in repos.json. Example: selfhost,hostedagent
+        required: false
+        default: 'all'
+        type: string
+      target_github_owner:
+        description: |
+          GitHub user or org to create the failover repos under.
+          Leave blank to use this repository's owner.
+        required: false
+        default: ''
+        type: string
+      force_sync:
+        description: |
+          If the target repo already exists, force-push to sync it with the
+          latest backup. Use 'true' to resync on subsequent runs.
+          Default 'false' skips repos that already exist.
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dr-github-failover
+  cancel-in-progress: false   # Never cancel a failover activation in progress
+
+jobs:
+  # ── Build the activation matrix from repos.json + optional filter ─────────
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.build.outputs.matrix }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build activation matrix
+        id: build
+        env:
+          REPOS_INPUT: ${{ github.event.inputs.repos_to_activate }}
+        run: |
+          ALL=$(jq -c '[.[] | select((has("enabled") | not) or (.enabled == true))]' repos.json)
+
+          if [ -z "$REPOS_INPUT" ] || [ "$REPOS_INPUT" = "all" ]; then
+            MATRIX="$ALL"
+          else
+            FILTER=$(printf '%s' "$REPOS_INPUT" \
+              | jq -R 'split(",") | map(gsub("^\\s+|\\s+$";"")) | map(select(length > 0))')
+            MATRIX=$(jq -cn \
+              --argjson all    "$ALL" \
+              --argjson filter "$FILTER" \
+              '$all | map(select(.ado_repo as $r | $filter | any(. == $r)))')
+          fi
+
+          COUNT=$(echo "$MATRIX" | jq 'length')
+          if [ "$COUNT" -eq 0 ]; then
+            echo "ERROR: No repos matched. Check repos.json and input."
+            exit 1
+          fi
+
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+          echo "Repos queued for GitHub failover activation: $COUNT"
+
+          TARGET_OWNER="${{ github.event.inputs.target_github_owner }}"
+          TARGET_OWNER="${TARGET_OWNER:-${{ github.repository_owner }}}"
+
+          {
+            echo "## DR GitHub Failover Activation — $(date -u '+%Y-%m-%d %H:%M UTC')"
+            echo ""
+            echo "| Input | Value |"
+            echo "|-------|-------|"
+            echo "| Target GitHub Owner | \`$TARGET_OWNER\` |"
+            echo "| Force Sync | \`${{ github.event.inputs.force_sync || 'false' }}\` |"
+            echo "| Triggered by | \`${{ github.actor }}\` |"
+            echo ""
+            echo "**Repos selected ($COUNT):**"
+            echo "$MATRIX" | jq -r '.[] | "- `" + .ado_repo + "` (backup: `" + .ado_repo + "_backup` → live: `" + .ado_repo + "`)"'
+            echo ""
+            echo "---"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ── Per-repo: clone from _backup, create/sync live GitHub repo ────────────
+  activate:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      matrix:
+        repo: ${{ fromJson(needs.prepare.outputs.matrix) }}
+      fail-fast: false    # Attempt all repos even if one fails
+
+    steps:
+      - name: Set names for this activation
+        run: |
+          GH_OWNER="${{ github.event.inputs.target_github_owner }}"
+          GH_OWNER="${GH_OWNER:-${{ github.repository_owner }}}"
+          BACKUP_REPO="${{ matrix.repo.ado_repo }}_backup"
+          TARGET_REPO="${{ matrix.repo.ado_repo }}"
+          FORCE_SYNC="${{ github.event.inputs.force_sync }}"
+          FORCE_SYNC="${FORCE_SYNC:-false}"
+
+          echo "GH_OWNER=$GH_OWNER"       >> "$GITHUB_ENV"
+          echo "BACKUP_REPO=$BACKUP_REPO" >> "$GITHUB_ENV"
+          echo "TARGET_REPO=$TARGET_REPO" >> "$GITHUB_ENV"
+          echo "FORCE_SYNC=$FORCE_SYNC"   >> "$GITHUB_ENV"
+
+          echo "Backup source : github.com/${{ github.repository_owner }}/$BACKUP_REPO"
+          echo "Failover target: github.com/$GH_OWNER/$TARGET_REPO"
+          echo "Force sync    : $FORCE_SYNC"
+
+      - name: Validate secrets
+        run: |
+          if [ -z "${{ secrets.GH_PAT }}" ]; then
+            echo "ERROR: GH_PAT secret is missing."
+            echo "Add a GH_PAT with 'repo' and 'workflow' scopes at Settings → Secrets → Actions."
+            exit 1
+          fi
+          echo "GH_PAT present."
+
+      - name: Check if target repo already exists
+        id: check-exists
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          if gh api "repos/$GH_OWNER/$TARGET_REPO" --silent 2>/dev/null; then
+            echo "repo_exists=true" >> "$GITHUB_OUTPUT"
+            echo "Target github.com/$GH_OWNER/$TARGET_REPO already exists."
+            if [ "$FORCE_SYNC" != "true" ]; then
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              echo "force_sync=false — skipping. Set force_sync=true to resync."
+            else
+              echo "skip=false" >> "$GITHUB_OUTPUT"
+              echo "force_sync=true — will force-push latest backup."
+            fi
+          else
+            echo "repo_exists=false" >> "$GITHUB_OUTPUT"
+            echo "skip=false"        >> "$GITHUB_OUTPUT"
+            echo "Target repo does not exist yet — will create."
+          fi
+
+      - name: Clone from GitHub backup repo
+        if: ${{ steps.check-exists.outputs.skip != 'true' }}
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+        run: |
+          git clone --mirror \
+            "https://x-access-token:$GH_PAT@github.com/${{ github.repository_owner }}/${BACKUP_REPO}.git" \
+            live-mirror
+          echo "Cloned $BACKUP_REPO — refs:"
+          git -C live-mirror for-each-ref --format='%(refname)' refs/heads refs/tags | head -20
+
+      - name: Create target GitHub repo (if new)
+        if: ${{ steps.check-exists.outputs.skip != 'true' && steps.check-exists.outputs.repo_exists != 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          gh repo create "$GH_OWNER/$TARGET_REPO" \
+            --private \
+            --description "DR failover — from ADO: ${{ matrix.repo.ado_org }}/${{ matrix.repo.ado_project }}/${{ matrix.repo.ado_repo }}" \
+          && echo "Created: github.com/$GH_OWNER/$TARGET_REPO" \
+          || { echo "ERROR: Failed to create GitHub repo $GH_OWNER/$TARGET_REPO"; exit 1; }
+
+      - name: Push to target GitHub repo
+        if: ${{ steps.check-exists.outputs.skip != 'true' }}
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+        run: |
+          cd live-mirror
+          git push --force \
+            "https://x-access-token:$GH_PAT@github.com/$GH_OWNER/${TARGET_REPO}.git" \
+            '+refs/heads/*:refs/heads/*' \
+            '+refs/tags/*:refs/tags/*'
+
+          echo "Pushed → https://github.com/$GH_OWNER/$TARGET_REPO"
+
+      - name: Verify and report
+        env:
+          GH_PAT:      ${{ secrets.GH_PAT }}
+          SKIP:        ${{ steps.check-exists.outputs.skip }}
+          REPO_EXISTS: ${{ steps.check-exists.outputs.repo_exists }}
+        run: |
+          if [ "$SKIP" = "true" ]; then
+            {
+              echo "### \`${{ matrix.repo.ado_repo }}\` → \`$TARGET_REPO\`"
+              echo ""
+              echo "**Status: ⏭️ SKIPPED** — repo already exists and force_sync=false."
+              echo ""
+              echo "To resync: re-run this workflow with \`force_sync=true\`."
+              echo ""
+              echo "**Repo URL:** [https://github.com/$GH_OWNER/$TARGET_REPO](https://github.com/$GH_OWNER/$TARGET_REPO)"
+              echo ""
+              echo "---"
+              echo ""
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # Parity check: compare backup refs vs live repo
+          BACKUP_BRANCHES=$(git -C live-mirror for-each-ref --format='%(refname)' refs/heads | wc -l | tr -d ' ')
+          BACKUP_TAGS=$(    git -C live-mirror for-each-ref --format='%(refname)' refs/tags  | wc -l | tr -d ' ')
+          BACKUP_HEAD=$(    git -C live-mirror rev-parse refs/heads/main 2>/dev/null \
+                            || git -C live-mirror for-each-ref --format='%(objectname)' refs/heads | head -1)
+
+          LIVE_REMOTE="https://x-access-token:$GH_PAT@github.com/$GH_OWNER/${TARGET_REPO}.git"
+          LIVE_BRANCHES=$(git ls-remote --heads "$LIVE_REMOTE" | wc -l | tr -d ' ')
+          LIVE_TAGS=$(    git ls-remote --tags  "$LIVE_REMOTE" | grep -v '\^{}' | wc -l | tr -d ' ')
+          LIVE_HEAD=$(    git ls-remote "$LIVE_REMOTE" refs/heads/main 2>/dev/null | awk '{print $1}' \
+                          || git ls-remote "$LIVE_REMOTE" | head -1 | awk '{print $1}')
+
+          echo "Backup — branches: $BACKUP_BRANCHES, tags: $BACKUP_TAGS, head: ${BACKUP_HEAD:0:10}"
+          echo "Live   — branches: $LIVE_BRANCHES,  tags: $LIVE_TAGS,  head: ${LIVE_HEAD:0:10}"
+
+          PASS=true
+          NOTES=""
+          [ "$BACKUP_BRANCHES" != "$LIVE_BRANCHES" ] && { PASS=false; NOTES="$NOTES Branch count mismatch ($BACKUP_BRANCHES vs $LIVE_BRANCHES)."; }
+          [ "$BACKUP_TAGS"     != "$LIVE_TAGS"     ] && { PASS=false; NOTES="$NOTES Tag count mismatch ($BACKUP_TAGS vs $LIVE_TAGS)."; }
+          [ -n "$BACKUP_HEAD" ] && [ -n "$LIVE_HEAD" ] && [ "$BACKUP_HEAD" != "$LIVE_HEAD" ] \
+            && { PASS=false; NOTES="$NOTES HEAD commit mismatch."; }
+
+          if [ "$REPO_EXISTS" = "true" ]; then
+            ACTION_TAKEN="Resynced"
+          else
+            ACTION_TAKEN="Created"
+          fi
+
+          if [ "$PASS" = "true" ]; then
+            RESULT="✅ PASSED"
+            echo "VERIFICATION PASSED ($ACTION_TAKEN)"
+          else
+            RESULT="❌ FAILED — $NOTES"
+            echo "VERIFICATION FAILED: $NOTES"
+          fi
+
+          {
+            echo "### \`${{ matrix.repo.ado_repo }}\` → \`$TARGET_REPO\` ($ACTION_TAKEN)"
+            echo ""
+            echo "| Metric | Backup | Live Repo |"
+            echo "|--------|:------:|:---------:|"
+            echo "| Branches | $BACKUP_BRANCHES | $LIVE_BRANCHES |"
+            echo "| Tags | $BACKUP_TAGS | $LIVE_TAGS |"
+            echo "| HEAD commit | \`${BACKUP_HEAD:0:10}\` | \`${LIVE_HEAD:0:10}\` |"
+            echo "| **Verification** | | **$RESULT** |"
+            echo ""
+            echo "**Repo URL:** [https://github.com/$GH_OWNER/$TARGET_REPO](https://github.com/$GH_OWNER/$TARGET_REPO)"
+            echo ""
+            echo "> Clone or fork this repo and run GitHub Actions deploy pipelines directly."
+            echo ""
+            echo "---"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          [ "$PASS" = "true" ] || exit 1
+
+  # ─── FAILURE ALERTING ────────────────────────────────────────────────────────
+  # Controlled by repository variable ALERTING_ENABLED.
+  # To enable:  Settings → Variables → Actions → ALERTING_ENABLED = true
+  # ─────────────────────────────────────────────────────────────────────────────
+  notify-on-failure:
+    needs: [prepare, activate]
+    if: ${{ failure() && vars.ALERTING_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send Teams alert (if configured)
+        env:
+          ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          REPO: ${{ github.repository }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          {
+            echo "## DR GitHub Failover Failure Alert"
+            echo "- Repository: $REPO"
+            echo "- Actor: $ACTOR"
+            echo "- Run URL: $RUN_URL"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ -z "$ALERT_WEBHOOK_URL" ]; then
+            echo "ALERT_WEBHOOK_URL secret is not configured; skipping external notification."
+            exit 0
+          fi
+
+          PAYLOAD=$(jq -cn \
+            --arg repo  "$REPO" \
+            --arg actor "$ACTOR" \
+            --arg url   "$RUN_URL" \
+            '{
+              "type": "AdaptiveCard",
+              "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+              "version": "1.4",
+              "body": [
+                {
+                  "type": "TextBlock",
+                  "size": "Medium",
+                  "weight": "Bolder",
+                  "color": "Attention",
+                  "text": "🚨 DR GitHub Failover FAILED"
+                },
+                {
+                  "type": "FactSet",
+                  "facts": [
+                    { "title": "Repository", "value": $repo  },
+                    { "title": "Actor",      "value": $actor },
+                    { "title": "Run URL",    "value": $url   }
+                  ]
+                },
+                {
+                  "type": "ActionSet",
+                  "actions": [
+                    {
+                      "type": "Action.OpenUrl",
+                      "title": "View Run",
+                      "url": $url
+                    }
+                  ]
+                }
+              ]
+            }')
+
+          curl -sS -X POST "$ALERT_WEBHOOK_URL" \
+            -H 'Content-Type: application/json' \
+            -d "$PAYLOAD"
+          echo "Teams Adaptive Card alert sent."
