@@ -1,0 +1,16 @@
+[
+  {
+    "github_owner": "your-github-org",
+    "github_repo": "your-repo-name",
+    "ado_project": "YourADOProject",
+    "ado_repo": "your-repo-name",
+    "enabled": true
+  },
+  {
+    "github_owner": "your-github-org",
+    "github_repo": "another-repo",
+    "ado_project": "YourADOProject",
+    "ado_repo": "another-repo",
+    "enabled": false
+  }
+]

@@ -1,0 +1,383 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# DR - Mirror GitHub Repos to Azure DevOps
+# ──────────────────────────────────────────────────────────────────────────────
+# PURPOSE: Mirrors enabled GitHub repos (listed in github-repos.json) into
+#          Azure DevOps repos on a daily schedule. This is the ADO-side DR
+#          counterpart to the GitHub Actions dr-mirror.yml workflow.
+#
+#          Running from ADO means this pipeline continues to work even if
+#          GitHub has an outage — the last successful mirror is already in ADO.
+#
+# WHAT IS MIRRORED:
+#   - All branches and tags (full history)
+#   - Blobs > 100 MB are stripped (GitHub file size limit safety)
+#   - ADO repo is created automatically if it does not exist
+#
+# WHAT IS NOT MIRRORED:
+#   - GitHub Issues / Pull Requests
+#   - GitHub Actions workflow run history
+#   - GitHub Secrets (GitHub API never exposes these)
+#   - GitHub Packages / Releases (extend if needed)
+#
+# ── SETUP REQUIRED (one-time) ─────────────────────────────────────────────────
+#
+# 1. VARIABLE GROUP — create 'dr-github-backup-secrets' in ADO:
+#      GITHUB_PAT          (secret) — GitHub PAT with 'repo' scope
+#      TEAMS_WEBHOOK_URL   (secret, optional) — Teams incoming webhook URL
+#
+# 2. BUILD SERVICE PERMISSIONS — for each ADO project in github-repos.json:
+#      Project Settings → Repositories → Security
+#      Grant "{ProjectName} Build Service ({OrgName})":
+#        • Contribute          ← needed to push to existing repos
+#        • Create repository   ← needed to auto-create new repos
+#
+# 3. PIPELINE LOCATION — this file must live in an ADO repository
+#      (not only on GitHub) so it runs independently if GitHub goes down.
+#      Recommended: a dedicated ADO repo named 'DR-Config' that also holds
+#      github-repos.json.
+#
+# 4. PIPELINE REGISTRATION — in ADO:
+#      Pipelines → New Pipeline → Azure Repos Git → select DR-Config repo
+#      → Existing Azure Pipelines YAML file → this file
+#
+# ── INPUTS ────────────────────────────────────────────────────────────────────
+#   github_repos — comma-separated repo names, or 'all' (default)
+#   strip_large_files — strip blobs > 100 MB from history (default: true)
+# ──────────────────────────────────────────────────────────────────────────────
+
+trigger: none   # No CI trigger — schedule + manual only
+
+schedules:
+  - cron: '0 20 * * *'        # Daily at 20:00 UTC (2 h after GitHub Actions mirror)
+    displayName: Daily GitHub → ADO Mirror
+    branches:
+      include:
+        - main
+    always: true              # Run even when no code changes in this repo
+
+parameters:
+  - name: github_repos
+    displayName: 'GitHub repos to mirror (comma-separated repo names, or "all")'
+    type: string
+    default: 'all'
+
+  - name: strip_large_files
+    displayName: Strip blobs > 100 MB from history
+    type: boolean
+    default: true
+
+variables:
+  - group: dr-github-backup-secrets   # Must contain: GITHUB_PAT, TEAMS_WEBHOOK_URL (optional)
+
+pool:
+  vmImage: ubuntu-latest
+
+# ──────────────────────────────────────────────────────────────────────────────
+jobs:
+
+  # ── Main mirror job ─────────────────────────────────────────────────────────
+  - job: MirrorGitHubToADO
+    displayName: Mirror GitHub Repos → ADO
+    timeoutInMinutes: 120
+    steps:
+
+      # ── 1. Validate secrets ──────────────────────────────────────────────────
+      - script: |
+          if [ -z "$(GITHUB_PAT)" ]; then
+            echo "##vso[task.logissue type=error]GITHUB_PAT is missing."
+            echo "Create variable group 'dr-github-backup-secrets' with GITHUB_PAT (secret)."
+            echo "Pipeline → Library → Variable Groups → dr-github-backup-secrets"
+            exit 1
+          fi
+          echo "GITHUB_PAT present."
+
+          if [ ! -f "github-repos.json" ]; then
+            echo "##vso[task.logissue type=error]github-repos.json not found in repo root."
+            echo "Create github-repos.json listing the GitHub repos to mirror."
+            exit 1
+          fi
+          echo "github-repos.json found."
+        displayName: Validate prerequisites
+        env:
+          GITHUB_PAT: $(GITHUB_PAT)
+
+      # ── 2. Install git-filter-repo (strip large files) ───────────────────────
+      - script: |
+          pip install git-filter-repo --quiet
+          git filter-repo --version
+        displayName: Install git-filter-repo
+        condition: eq('${{ parameters.strip_large_files }}', 'True')
+
+      # ── 3. Build repo list from github-repos.json + parameter filter ─────────
+      - script: |
+          REPOS_INPUT="${{ parameters.github_repos }}"
+          ALL=$(jq -c '[.[] | select((has("enabled") | not) or (.enabled == true))]' github-repos.json)
+
+          if [ -z "$REPOS_INPUT" ] || [ "$REPOS_INPUT" = "all" ]; then
+            REPOS="$ALL"
+          else
+            FILTER=$(printf '%s' "$REPOS_INPUT" \
+              | jq -R 'split(",") | map(gsub("^\\s+|\\s+$";"")) | map(select(length > 0))')
+            REPOS=$(jq -cn \
+              --argjson all    "$ALL" \
+              --argjson filter "$FILTER" \
+              '$all | map(select(.github_repo as $r | $filter | any(. == $r)))')
+          fi
+
+          COUNT=$(echo "$REPOS" | jq 'length')
+          if [ "$COUNT" -eq 0 ]; then
+            echo "##vso[task.logissue type=error]No repos matched. Check github-repos.json and parameter input."
+            exit 1
+          fi
+
+          echo "Repos queued for mirroring: $COUNT"
+          echo "$REPOS" | jq -r '.[] | "  github.com/" + .github_owner + "/" + .github_repo + " → ADO:" + .ado_project + "/" + .ado_repo'
+
+          # Persist for next step
+          echo "$REPOS" > "$(Agent.TempDirectory)/repos-to-mirror.json"
+          echo "##vso[task.setvariable variable=REPO_COUNT]$COUNT"
+        displayName: Load repos from github-repos.json
+
+      # ── 4. Pre-flight: verify GitHub + ADO connectivity ──────────────────────
+      - script: |
+          echo "=== Pre-flight connectivity checks ==="
+          FAIL=0
+
+          # ── GitHub reachability ────────────────────────────────────────────
+          HTTP=$(curl -sS -w "%{http_code}" -o /tmp/pf-gh.json \
+            -H "Authorization: Bearer $GITHUB_PAT" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/user")
+          if [ "$HTTP" = "200" ]; then
+            GH_USER=$(jq -r '.login' /tmp/pf-gh.json)
+            echo "✓ GitHub reachable — authenticated as: $GH_USER"
+          else
+            echo "##vso[task.logissue type=error]Cannot reach GitHub API (HTTP $HTTP)."
+            echo "  Check GITHUB_PAT value and expiry."
+            FAIL=1
+          fi
+
+          # ── ADO org reachability (System.AccessToken) ─────────────────────
+          ADO_ORG_URL="$(System.TeamFoundationCollectionUri)"
+          ADO_ORG_URL="${ADO_ORG_URL%/}"   # strip trailing slash
+          HTTP=$(curl -sS -w "%{http_code}" -o /tmp/pf-ado.json \
+            -u ":$(System.AccessToken)" \
+            "$ADO_ORG_URL/_apis/projects?api-version=7.1")
+          if [ "$HTTP" = "200" ]; then
+            echo "✓ ADO org reachable (HTTP 200)"
+          else
+            echo "##vso[task.logissue type=error]Cannot reach ADO org (HTTP $HTTP)."
+            echo "  Ensure the pipeline's Build Service has correct permissions."
+            FAIL=1
+          fi
+
+          # ── Verify each GitHub repo is clonable ────────────────────────────
+          REPOS=$(cat "$(Agent.TempDirectory)/repos-to-mirror.json")
+          COUNT=$(echo "$REPOS" | jq 'length')
+          for i in $(seq 0 $((COUNT - 1))); do
+            GH_OWNER=$(echo "$REPOS" | jq -r ".[$i].github_owner")
+            GH_REPO=$(echo "$REPOS" | jq -r ".[$i].github_repo")
+            HTTP=$(curl -sS -w "%{http_code}" -o /dev/null \
+              -H "Authorization: Bearer $GITHUB_PAT" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/$GH_OWNER/$GH_REPO")
+            if [ "$HTTP" = "200" ]; then
+              echo "✓ GitHub repo accessible: $GH_OWNER/$GH_REPO"
+            elif [ "$HTTP" = "404" ]; then
+              echo "##vso[task.logissue type=warning]GitHub repo not found: $GH_OWNER/$GH_REPO (HTTP 404) — will skip."
+            else
+              echo "##vso[task.logissue type=warning]GitHub repo check HTTP $HTTP: $GH_OWNER/$GH_REPO"
+            fi
+          done
+
+          echo ""
+          if [ "$FAIL" = "1" ]; then
+            echo "##vso[task.logissue type=error]Pre-flight failed — see warnings above."
+            exit 1
+          fi
+          echo "=== All pre-flight checks passed ==="
+        displayName: Pre-flight connectivity check
+        env:
+          GITHUB_PAT: $(GITHUB_PAT)
+
+      # ── 5. Mirror each repo ──────────────────────────────────────────────────
+      - script: |
+          REPOS=$(cat "$(Agent.TempDirectory)/repos-to-mirror.json")
+          COUNT=$(echo "$REPOS" | jq 'length')
+          ADO_ORG_URL="$(System.TeamFoundationCollectionUri)"
+          ADO_ORG_URL="${ADO_ORG_URL%/}"
+          FAILURES=0
+          SUCCESSES=0
+
+          for i in $(seq 0 $((COUNT - 1))); do
+            REPO=$(echo "$REPOS" | jq -c ".[$i]")
+            GH_OWNER=$(echo "$REPO" | jq -r '.github_owner')
+            GH_REPO=$(echo "$REPO"  | jq -r '.github_repo')
+            ADO_PROJECT=$(echo "$REPO" | jq -r '.ado_project')
+            ADO_REPO=$(echo "$REPO"    | jq -r '.ado_repo')
+
+            echo ""
+            echo "════════════════════════════════════════════════════════"
+            echo "  [$((i+1))/$COUNT] github.com/$GH_OWNER/$GH_REPO"
+            echo "         → ADO: $ADO_PROJECT/$ADO_REPO"
+            echo "════════════════════════════════════════════════════════"
+
+            # URL-encode project and repo names (handles spaces and special chars)
+            ADO_PROJECT_ENC=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$ADO_PROJECT', safe=''))")
+            ADO_REPO_ENC=$(python3 -c    "import urllib.parse; print(urllib.parse.quote('$ADO_REPO',    safe=''))")
+            CLONE_DIR="$(Agent.TempDirectory)/mirror-$GH_REPO"
+
+            # ── Step A: Ensure ADO target repo exists ──────────────────────
+            HTTP=$(curl -sS -w "%{http_code}" -o /tmp/check-repo.json \
+              -u ":$(System.AccessToken)" \
+              "$ADO_ORG_URL/$ADO_PROJECT_ENC/_apis/git/repositories/$ADO_REPO_ENC?api-version=7.1-preview.1")
+
+            if [ "$HTTP" = "404" ]; then
+              echo "ADO repo '$ADO_REPO' does not exist — creating..."
+              CREATE_HTTP=$(curl -sS -w "%{http_code}" -o /tmp/create-repo.json \
+                -X POST \
+                -u ":$(System.AccessToken)" \
+                -H "Content-Type: application/json" \
+                -d "{\"name\":\"$ADO_REPO\"}" \
+                "$ADO_ORG_URL/$ADO_PROJECT_ENC/_apis/git/repositories?api-version=7.1-preview.1")
+              if [ "$CREATE_HTTP" != "201" ]; then
+                echo "##vso[task.logissue type=error]Failed to create ADO repo '$ADO_REPO' in '$ADO_PROJECT' (HTTP $CREATE_HTTP)."
+                echo "Ensure the Build Service has 'Create repository' permission on project '$ADO_PROJECT'."
+                cat /tmp/create-repo.json
+                FAILURES=$((FAILURES + 1))
+                continue
+              fi
+              echo "✓ Created ADO repo: $ADO_REPO in $ADO_PROJECT"
+            elif [ "$HTTP" = "200" ]; then
+              echo "ADO repo '$ADO_REPO' exists — will sync."
+            else
+              echo "##vso[task.logissue type=error]Cannot verify ADO repo '$ADO_REPO' (HTTP $HTTP)."
+              echo "Ensure the Build Service has 'Read' permission on project '$ADO_PROJECT'."
+              FAILURES=$((FAILURES + 1))
+              continue
+            fi
+
+            # ── Step B: Clone from GitHub (mirror) ────────────────────────
+            if ! git clone --mirror \
+              "https://$GITHUB_PAT@github.com/$GH_OWNER/$GH_REPO.git" \
+              "$CLONE_DIR" 2>&1; then
+              echo "##vso[task.logissue type=error]Failed to clone github.com/$GH_OWNER/$GH_REPO."
+              FAILURES=$((FAILURES + 1))
+              continue
+            fi
+
+            BRANCH_COUNT=$(git -C "$CLONE_DIR" for-each-ref --format='%(refname)' refs/heads | wc -l | tr -d ' ')
+            TAG_COUNT=$(   git -C "$CLONE_DIR" for-each-ref --format='%(refname)' refs/tags  | wc -l | tr -d ' ')
+            echo "Cloned — branches: $BRANCH_COUNT, tags: $TAG_COUNT"
+
+            # ── Step C: Strip blobs > 100 MB ──────────────────────────────
+            if [ "${{ parameters.strip_large_files }}" = "True" ]; then
+              git -C "$CLONE_DIR" filter-repo --strip-blobs-bigger-than 100M --force
+              echo "Large blobs stripped."
+            fi
+
+            # ── Step D: Push to ADO ───────────────────────────────────────
+            if ! git -C "$CLONE_DIR" push --force \
+              "$ADO_ORG_URL/$ADO_PROJECT_ENC/_git/$ADO_REPO_ENC" \
+              '+refs/heads/*:refs/heads/*' \
+              '+refs/tags/*:refs/tags/*' \
+              --config http.extraHeader="Authorization: Basic $(printf '%s' ":$(System.AccessToken)" | base64 -w 0)" \
+              2>&1; then
+              echo "##vso[task.logissue type=error]Failed to push '$GH_REPO' to ADO."
+              echo "Ensure the Build Service has 'Contribute' permission on project '$ADO_PROJECT'."
+              FAILURES=$((FAILURES + 1))
+              rm -rf "$CLONE_DIR"
+              continue
+            fi
+
+            echo "✓ Mirrored → $ADO_ORG_URL/$ADO_PROJECT/_git/$ADO_REPO"
+            SUCCESSES=$((SUCCESSES + 1))
+            rm -rf "$CLONE_DIR"   # free disk space before next repo
+          done
+
+          echo ""
+          echo "════════════════════════════════════════════════════════"
+          echo "  Mirror complete — success: $SUCCESSES / $COUNT | failed: $FAILURES / $COUNT"
+          echo "════════════════════════════════════════════════════════"
+
+          # Export summary counts for notification job
+          echo "##vso[task.setvariable variable=MIRROR_SUCCESSES;isOutput=true]$SUCCESSES"
+          echo "##vso[task.setvariable variable=MIRROR_FAILURES;isOutput=true]$FAILURES"
+          echo "##vso[task.setvariable variable=MIRROR_TOTAL;isOutput=true]$COUNT"
+
+          if [ "$FAILURES" -gt 0 ]; then
+            echo "##vso[task.complete result=Failed;]$FAILURES of $COUNT repos failed to mirror."
+            exit 1
+          fi
+        displayName: Mirror repos
+        name: mirror
+        env:
+          GITHUB_PAT: $(GITHUB_PAT)
+
+  # ── Failure notification job ─────────────────────────────────────────────────
+  - job: NotifyOnFailure
+    displayName: Send failure alert
+    dependsOn: MirrorGitHubToADO
+    condition: and(failed(), ne(variables['ALERTING_ENABLED'], ''))
+    variables:
+      SUCCESSES: $[ dependencies.MirrorGitHubToADO.outputs['mirror.MIRROR_SUCCESSES'] ]
+      FAILURES:  $[ dependencies.MirrorGitHubToADO.outputs['mirror.MIRROR_FAILURES'] ]
+      TOTAL:     $[ dependencies.MirrorGitHubToADO.outputs['mirror.MIRROR_TOTAL'] ]
+    steps:
+      - script: |
+          RUN_URL="$(System.TeamFoundationCollectionUri)$(System.TeamProject)/_build/results?buildId=$(Build.BuildId)"
+
+          if [ -z "$(TEAMS_WEBHOOK_URL)" ]; then
+            echo "TEAMS_WEBHOOK_URL not set in variable group — skipping external notification."
+            echo "Run URL: $RUN_URL"
+            exit 0
+          fi
+
+          PAYLOAD=$(jq -cn \
+            --arg org     "$(System.TeamFoundationCollectionUri)" \
+            --arg project "$(System.TeamProject)" \
+            --arg build   "$(Build.BuildNumber)" \
+            --arg actor   "$(Build.RequestedFor)" \
+            --arg url     "$RUN_URL" \
+            --arg stats   "$(SUCCESSES) succeeded / $(FAILURES) failed / $(TOTAL) total" \
+            '{
+              "type": "AdaptiveCard",
+              "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+              "version": "1.4",
+              "body": [
+                {
+                  "type": "TextBlock",
+                  "size": "Medium",
+                  "weight": "Bolder",
+                  "color": "Attention",
+                  "text": "🚨 DR GitHub → ADO Mirror FAILED"
+                },
+                {
+                  "type": "FactSet",
+                  "facts": [
+                    { "title": "ADO Org",    "value": $org     },
+                    { "title": "Project",    "value": $project },
+                    { "title": "Build",      "value": $build   },
+                    { "title": "Triggered",  "value": $actor   },
+                    { "title": "Results",    "value": $stats   },
+                    { "title": "Run URL",    "value": $url     }
+                  ]
+                },
+                {
+                  "type": "ActionSet",
+                  "actions": [
+                    { "type": "Action.OpenUrl", "title": "View Build", "url": $url }
+                  ]
+                }
+              ]
+            }')
+
+          HTTP=$(curl -sS -w "%{http_code}" -o /dev/null \
+            -X POST \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD" \
+            "$(TEAMS_WEBHOOK_URL)")
+          echo "Teams alert → HTTP $HTTP"
+        displayName: Send Teams alert
+        env:
+          TEAMS_WEBHOOK_URL: $(TEAMS_WEBHOOK_URL)
