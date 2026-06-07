@@ -22,7 +22,7 @@
 # ── SETUP REQUIRED (one-time) ─────────────────────────────────────────────────
 #
 # 1. VARIABLE GROUP — create 'dr-github-backup-secrets' in ADO:
-#      GITHUB_PAT          (secret) — GitHub PAT with 'repo' scope
+#      GITHUB_PAT_READ     (secret) — GitHub fine-grained PAT, Contents read-only on source repos
 #      TEAMS_WEBHOOK_URL   (secret, optional) — Teams incoming webhook URL
 #
 # 2. BUILD SERVICE PERMISSIONS — for each ADO project in github-repos.json:
@@ -67,7 +67,7 @@ parameters:
     default: true
 
 variables:
-  - group: dr-github-backup-secrets   # Must contain: GITHUB_PAT, TEAMS_WEBHOOK_URL (optional)
+  - group: dr-github-backup-secrets   # Must contain: GITHUB_PAT_READ, TEAMS_WEBHOOK_URL (optional)
 
 pool:
   vmImage: ubuntu-latest
@@ -83,13 +83,13 @@ jobs:
 
       # ── 1. Validate secrets ──────────────────────────────────────────────────
       - script: |
-          if [ -z "$(GITHUB_PAT)" ]; then
-            echo "##vso[task.logissue type=error]GITHUB_PAT is missing."
-            echo "Create variable group 'dr-github-backup-secrets' with GITHUB_PAT (secret)."
+          if [ -z "$(GITHUB_PAT_READ)" ]; then
+            echo "##vso[task.logissue type=error]GITHUB_PAT_READ is missing."
+            echo "Create variable group 'dr-github-backup-secrets' with GITHUB_PAT_READ (secret)."
             echo "Pipeline → Library → Variable Groups → dr-github-backup-secrets"
             exit 1
           fi
-          echo "GITHUB_PAT present."
+          echo "GITHUB_PAT_READ present."
 
           if [ ! -f "github-repos.json" ]; then
             echo "##vso[task.logissue type=error]github-repos.json not found in repo root."
@@ -99,7 +99,7 @@ jobs:
           echo "github-repos.json found."
         displayName: Validate prerequisites
         env:
-          GITHUB_PAT: $(GITHUB_PAT)
+          GITHUB_PAT: $(GITHUB_PAT_READ)
 
       # ── 2. Install git-filter-repo (strip large files) ───────────────────────
       - script: |
@@ -198,7 +198,7 @@ jobs:
           echo "=== All pre-flight checks passed ==="
         displayName: Pre-flight connectivity check
         env:
-          GITHUB_PAT: $(GITHUB_PAT)
+          GITHUB_PAT: $(GITHUB_PAT_READ)
 
       # ── 5. Mirror each repo ──────────────────────────────────────────────────
       - script: |
@@ -312,7 +312,7 @@ jobs:
         displayName: Mirror repos
         name: mirror
         env:
-          GITHUB_PAT: $(GITHUB_PAT)
+          GITHUB_PAT: $(GITHUB_PAT_READ)
 
   # ── Failure notification job ─────────────────────────────────────────────────
   - job: NotifyOnFailure

@@ -1,0 +1,435 @@
+name: DR - Mirror GitHub Repos to ADO
+
+# PURPOSE: Mirrors enabled GitHub repos (github-repos.json) into Azure DevOps
+#          repos with the ACTUAL repo name — no suffix, ready to use immediately.
+#          Also pushes this entire workflow-hub repo into ADO as a DR bootstrap
+#          so all DR tooling is available in ADO if GitHub becomes unavailable.
+#
+# TWO THINGS THIS WORKFLOW DOES:
+#   1. REPO MIRROR  — for each entry in github-repos.json:
+#        github.com/{owner}/{repo}  →  dev.azure.com/{org}/{project}/_git/{repo}
+#        ADO repo is created automatically if it does not exist.
+#
+#   2. DR TOOLING BOOTSTRAP — pushes this workflow-hub repo to ADO:
+#        github.com/{owner}/workflow-hub  →  dev.azure.com/{org}/{project}/_git/dr-workflow-hub
+#        This gives your team everything they need in ADO if GitHub goes down:
+#          • ado-pipelines/dr-github-to-ado-mirror.yml  — register as ADO pipeline
+#          • github-repos.json / repos.json             — config files
+#          • .github/workflows/*.yml                    — all DR workflow definitions
+#
+# WHY GITHUB ACTIONS (not ADO Pipeline):
+#   Single place to manage all DR workflows. Trade-off accepted: if GitHub itself
+#   goes down, this job can't run — but the last successful mirror already in ADO
+#   is what your team uses. The DR tooling bootstrap ensures ADO has what it
+#   needs to continue independently from that point.
+#
+# SCHEDULED: Daily at 20:00 UTC (90 min after dr-mirror.yml finishes)
+# MANUAL:    workflow_dispatch with optional repo filter
+#
+# ── REQUIRED SECRETS ─────────────────────────────────────────────────────────
+# ADO_DR_PAT  — ADO PAT scoped to DR project only
+#               Code — Read & write  (push mirrored repos)
+#               Code — Manage         (create repos via API)
+#               Scope: ONLY the DR target project, NOT all projects
+#
+# GH_PAT_READ — GitHub fine-grained PAT, source repos only
+#               Contents — Read       (clone private source repos)
+#               Scope: selected source repos only
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  schedule:
+    - cron: '0 20 * * *'    # Daily at 20:00 UTC
+  workflow_dispatch:
+    inputs:
+      github_repos:
+        description: |
+          Comma-separated GitHub repo names to mirror, or 'all' for every enabled
+          entry in github-repos.json. Example: my-repo,another-repo
+        required: false
+        default: 'all'
+        type: string
+      mirror_dr_tooling:
+        description: |
+          Also push this workflow-hub repo to ADO as the DR bootstrap repo.
+          Disable only if you want to mirror repos without updating the tooling copy.
+        required: false
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dr-github-to-ado
+  cancel-in-progress: false   # Never cancel a mirror in progress
+
+jobs:
+  # ── Load enabled repos from github-repos.json + apply optional filter ───────
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix:    ${{ steps.set-matrix.outputs.matrix }}
+      has_repos: ${{ steps.set-matrix.outputs.has_repos }}
+      ado_org:   ${{ steps.set-matrix.outputs.ado_org }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Load repos from github-repos.json
+        id: set-matrix
+        env:
+          REPOS_INPUT: ${{ github.event.inputs.github_repos }}
+        run: |
+          if [ ! -f "github-repos.json" ]; then
+            echo "::error::github-repos.json not found in repo root."
+            echo "Create it listing the GitHub repos to mirror to ADO."
+            exit 1
+          fi
+
+          ALL=$(jq -c '[.[] | select((has("enabled") | not) or (.enabled == true))]' github-repos.json)
+
+          if [ -z "$REPOS_INPUT" ] || [ "$REPOS_INPUT" = "all" ]; then
+            MATRIX="$ALL"
+          else
+            FILTER=$(printf '%s' "$REPOS_INPUT" \
+              | jq -R 'split(",") | map(gsub("^\\s+|\\s+$";"")) | map(select(length > 0))')
+            MATRIX=$(jq -cn \
+              --argjson all    "$ALL" \
+              --argjson filter "$FILTER" \
+              '$all | map(select(.github_repo as $r | $filter | any(. == $r)))')
+          fi
+
+          COUNT=$(echo "$MATRIX" | jq 'length')
+
+          # Read ado_org from first entry (used by tooling bootstrap job)
+          ADO_ORG=$(jq -r '.[0].ado_org // empty' github-repos.json)
+          if [ -z "$ADO_ORG" ]; then
+            ADO_ORG=$(jq -r '.[0].ado_org // empty' repos.json 2>/dev/null || echo "")
+          fi
+
+          echo "ado_org=$ADO_ORG"  >> "$GITHUB_OUTPUT"
+
+          if [ "$COUNT" -eq 0 ]; then
+            echo "No enabled repos found in github-repos.json — skipping repo mirror."
+            echo "has_repos=false" >> "$GITHUB_OUTPUT"
+            echo "matrix=[]"       >> "$GITHUB_OUTPUT"
+          else
+            echo "has_repos=true"  >> "$GITHUB_OUTPUT"
+            echo "matrix=$MATRIX"  >> "$GITHUB_OUTPUT"
+            echo "Repos queued for ADO mirror: $COUNT"
+            echo "$MATRIX" | jq -r '.[] | "  github.com/" + .github_owner + "/" + .github_repo + " → ADO:" + .ado_org + "/" + .ado_project + "/" + .ado_repo'
+          fi
+
+          {
+            echo "## DR GitHub → ADO Mirror — $(date -u '+%Y-%m-%d %H:%M UTC')"
+            echo ""
+            echo "| Input | Value |"
+            echo "|-------|-------|"
+            echo "| Repos queued | $COUNT |"
+            echo "| DR Tooling bootstrap | \`${{ github.event.inputs.mirror_dr_tooling || 'true' }}\` |"
+            echo "| Triggered by | \`${{ github.actor }}\` |"
+            echo ""
+            if [ "$COUNT" -gt 0 ]; then
+              echo "**Repos:**"
+              echo "$MATRIX" | jq -r '.[] | "- `" + .github_repo + "` → ADO `" + .ado_project + "/" + .ado_repo + "`"'
+            fi
+            echo ""
+            echo "---"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ── Per-repo: clone from GitHub, push to ADO with actual name ───────────────
+  mirror-repos:
+    needs: prepare
+    if: ${{ needs.prepare.outputs.has_repos == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      matrix:
+        repo: ${{ fromJson(needs.prepare.outputs.matrix) }}
+      fail-fast: false    # Attempt all repos even if one fails
+
+    steps:
+      - name: Validate secrets
+        run: |
+          if [ -z "${{ secrets.ADO_DR_PAT }}" ]; then echo "ERROR: ADO_DR_PAT missing"; exit 1; fi
+          if [ -z "${{ secrets.GH_PAT_READ }}" ]; then echo "ERROR: GH_PAT_READ missing"; exit 1; fi
+          echo "Secrets OK."
+
+      - name: URL-encode org, project, and repo for API/git URLs
+        env:
+          ADO_ORG:     ${{ matrix.repo.ado_org }}
+          ADO_PROJECT: ${{ matrix.repo.ado_project }}
+          ADO_REPO:    ${{ matrix.repo.ado_repo }}
+        run: |
+          ORG_ENC=$(python3 -c  "import urllib.parse, os; print(urllib.parse.quote(os.environ['ADO_ORG'],     safe=''))")
+          PROJ_ENC=$(python3 -c "import urllib.parse, os; print(urllib.parse.quote(os.environ['ADO_PROJECT'], safe=''))")
+          REPO_ENC=$(python3 -c "import urllib.parse, os; print(urllib.parse.quote(os.environ['ADO_REPO'],    safe=''))")
+          echo "ADO_ORG_ENC=$ORG_ENC"   >> "$GITHUB_ENV"
+          echo "ADO_PROJ_ENC=$PROJ_ENC" >> "$GITHUB_ENV"
+          echo "ADO_REPO_ENC=$REPO_ENC" >> "$GITHUB_ENV"
+
+      - name: Ensure ADO repo exists (create if new)
+        env:
+          ADO_DR_PAT: ${{ secrets.ADO_DR_PAT }}
+        run: |
+          HTTP=$(curl -sS -w "%{http_code}" -o /tmp/check-repo.json \
+            -u ":$ADO_DR_PAT" \
+            "https://dev.azure.com/$ADO_ORG_ENC/$ADO_PROJ_ENC/_apis/git/repositories/$ADO_REPO_ENC?api-version=7.1-preview.1")
+
+          if [ "$HTTP" = "200" ]; then
+            echo "ADO repo '${{ matrix.repo.ado_repo }}' exists — will sync."
+          elif [ "$HTTP" = "404" ]; then
+            echo "ADO repo '${{ matrix.repo.ado_repo }}' not found — creating..."
+            CREATE_HTTP=$(curl -sS -w "%{http_code}" -o /tmp/create-repo.json \
+              -X POST \
+              -u ":$ADO_DR_PAT" \
+              -H "Content-Type: application/json" \
+              -d "{\"name\":\"${{ matrix.repo.ado_repo }}\"}" \
+              "https://dev.azure.com/$ADO_ORG_ENC/$ADO_PROJ_ENC/_apis/git/repositories?api-version=7.1-preview.1")
+            if [ "$CREATE_HTTP" != "201" ]; then
+              echo "::error::Failed to create ADO repo (HTTP $CREATE_HTTP)"
+              echo "Ensure ADO_DR_PAT has 'Code — Read, write & manage' scope on the DR project."
+              cat /tmp/create-repo.json
+              exit 1
+            fi
+            echo "Created: ${{ matrix.repo.ado_repo }} in ${{ matrix.repo.ado_project }}"
+          else
+            echo "::error::Cannot verify ADO repo (HTTP $HTTP). Check ADO_DR_PAT scopes."
+            cat /tmp/check-repo.json
+            exit 1
+          fi
+
+      - name: Clone from GitHub (mirror)
+        env:
+          GH_PAT_READ: ${{ secrets.GH_PAT_READ }}
+        run: |
+          git clone --mirror \
+            "https://x-access-token:$GH_PAT_READ@github.com/${{ matrix.repo.github_owner }}/${{ matrix.repo.github_repo }}.git" \
+            gh-mirror
+          echo "Cloned refs:"
+          git -C gh-mirror for-each-ref --format='%(refname)' refs/heads refs/tags | head -20
+
+      - name: Push to ADO (actual repo name)
+        env:
+          ADO_DR_PAT: ${{ secrets.ADO_DR_PAT }}
+        run: |
+          git -C gh-mirror push --force \
+            "https://:$ADO_DR_PAT@dev.azure.com/$ADO_ORG_ENC/$ADO_PROJ_ENC/_git/$ADO_REPO_ENC" \
+            '+refs/heads/*:refs/heads/*' \
+            '+refs/tags/*:refs/tags/*'
+
+          echo "Pushed → https://dev.azure.com/${{ matrix.repo.ado_org }}/${{ matrix.repo.ado_project }}/_git/${{ matrix.repo.ado_repo }}"
+
+      - name: Verify and report
+        env:
+          ADO_DR_PAT: ${{ secrets.ADO_DR_PAT }}
+        run: |
+          GH_BRANCHES=$(git -C gh-mirror for-each-ref --format='%(refname)' refs/heads | wc -l | tr -d ' ')
+          GH_TAGS=$(    git -C gh-mirror for-each-ref --format='%(refname)' refs/tags  | wc -l | tr -d ' ')
+          GH_HEAD=$(    git -C gh-mirror rev-parse refs/heads/main 2>/dev/null \
+                        || git -C gh-mirror for-each-ref --format='%(objectname)' refs/heads | head -1)
+
+          ADO_REMOTE="https://:$ADO_DR_PAT@dev.azure.com/$ADO_ORG_ENC/$ADO_PROJ_ENC/_git/$ADO_REPO_ENC"
+          ADO_BRANCHES=$(git ls-remote --heads "$ADO_REMOTE" | wc -l | tr -d ' ')
+          ADO_TAGS=$(    git ls-remote --tags  "$ADO_REMOTE" | grep -v '\^{}' | wc -l | tr -d ' ')
+          ADO_HEAD=$(    git ls-remote "$ADO_REMOTE" refs/heads/main 2>/dev/null | awk '{print $1}' \
+                         || git ls-remote "$ADO_REMOTE" | head -1 | awk '{print $1}')
+
+          PASS=true
+          NOTES=""
+          [ "$GH_BRANCHES" != "$ADO_BRANCHES" ] && { PASS=false; NOTES="$NOTES Branch count mismatch ($GH_BRANCHES vs $ADO_BRANCHES)."; }
+          [ "$GH_TAGS"     != "$ADO_TAGS"     ] && { PASS=false; NOTES="$NOTES Tag count mismatch ($GH_TAGS vs $ADO_TAGS)."; }
+          [ -n "$GH_HEAD" ] && [ -n "$ADO_HEAD" ] && [ "$GH_HEAD" != "$ADO_HEAD" ] \
+            && { PASS=false; NOTES="$NOTES HEAD commit mismatch."; }
+
+          ADO_URL="https://dev.azure.com/${{ matrix.repo.ado_org }}/${{ matrix.repo.ado_project }}/_git/${{ matrix.repo.ado_repo }}"
+          if [ "$PASS" = "true" ]; then RESULT="✅ PASSED"; else RESULT="❌ FAILED — $NOTES"; fi
+
+          {
+            echo "### \`${{ matrix.repo.github_repo }}\` → ADO \`${{ matrix.repo.ado_repo }}\`"
+            echo ""
+            echo "| Metric | GitHub | ADO |"
+            echo "|--------|:------:|:---:|"
+            echo "| Branches | $GH_BRANCHES | $ADO_BRANCHES |"
+            echo "| Tags | $GH_TAGS | $ADO_TAGS |"
+            echo "| HEAD commit | \`${GH_HEAD:0:10}\` | \`${ADO_HEAD:0:10}\` |"
+            echo "| **Verification** | | **$RESULT** |"
+            echo ""
+            echo "**ADO URL:** [$ADO_URL]($ADO_URL)"
+            echo ""
+            echo "---"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          [ "$PASS" = "true" ] || exit 1
+
+  # ── Push this workflow-hub repo to ADO (DR bootstrap) ───────────────────────
+  # This ensures ADO always has:
+  #   • ado-pipelines/dr-github-to-ado-mirror.yml  → register as ADO pipeline
+  #   • github-repos.json / repos.json             → config files
+  #   • .github/workflows/*.yml                    → all DR workflow definitions
+  # If GitHub goes down, your team opens ADO, finds dr-workflow-hub, and has
+  # everything needed to continue DR operations independently.
+  mirror-dr-tooling:
+    needs: prepare
+    if: ${{ github.event.inputs.mirror_dr_tooling != 'false' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout workflow-hub repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0    # Full history so the ADO mirror is complete
+
+      - name: Validate secrets
+        run: |
+          if [ -z "${{ secrets.ADO_DR_PAT }}" ]; then echo "ERROR: ADO_DR_PAT missing"; exit 1; fi
+          echo "Secrets OK."
+
+      - name: Resolve ADO org and project for tooling repo
+        run: |
+          ADO_ORG="${{ needs.prepare.outputs.ado_org }}"
+          if [ -z "$ADO_ORG" ]; then
+            ADO_ORG=$(jq -r '.[0].ado_org // empty' repos.json 2>/dev/null || echo "")
+          fi
+          if [ -z "$ADO_ORG" ]; then
+            echo "::error::Cannot determine ADO org. Add ado_org to github-repos.json or repos.json."
+            exit 1
+          fi
+          ADO_PROJECT=$(jq -r '.[0].ado_project // empty' repos.json 2>/dev/null || echo "")
+          if [ -z "$ADO_PROJECT" ]; then
+            echo "::error::Cannot determine ADO project from repos.json."
+            exit 1
+          fi
+          ADO_ORG_ENC=$(python3    -c "import urllib.parse; print(urllib.parse.quote('$ADO_ORG',     safe=''))")
+          ADO_PROJ_ENC=$(python3   -c "import urllib.parse; print(urllib.parse.quote('$ADO_PROJECT', safe=''))")
+          echo "TOOLING_ORG=$ADO_ORG"           >> "$GITHUB_ENV"
+          echo "TOOLING_PROJECT=$ADO_PROJECT"   >> "$GITHUB_ENV"
+          echo "TOOLING_ORG_ENC=$ADO_ORG_ENC"  >> "$GITHUB_ENV"
+          echo "TOOLING_PROJ_ENC=$ADO_PROJ_ENC" >> "$GITHUB_ENV"
+          echo "Tooling repo target: $ADO_ORG/$ADO_PROJECT/dr-workflow-hub"
+
+      - name: Ensure ADO dr-workflow-hub repo exists
+        env:
+          ADO_DR_PAT: ${{ secrets.ADO_DR_PAT }}
+        run: |
+          HTTP=$(curl -sS -w "%{http_code}" -o /tmp/check-tooling.json \
+            -u ":$ADO_DR_PAT" \
+            "https://dev.azure.com/$TOOLING_ORG_ENC/$TOOLING_PROJ_ENC/_apis/git/repositories/dr-workflow-hub?api-version=7.1-preview.1")
+
+          if [ "$HTTP" = "200" ]; then
+            echo "dr-workflow-hub repo exists — will sync."
+          elif [ "$HTTP" = "404" ]; then
+            CREATE_HTTP=$(curl -sS -w "%{http_code}" -o /tmp/create-tooling.json \
+              -X POST \
+              -u ":$ADO_DR_PAT" \
+              -H "Content-Type: application/json" \
+              -d '{"name":"dr-workflow-hub"}' \
+              "https://dev.azure.com/$TOOLING_ORG_ENC/$TOOLING_PROJ_ENC/_apis/git/repositories?api-version=7.1-preview.1")
+            if [ "$CREATE_HTTP" != "201" ]; then
+              echo "::error::Failed to create dr-workflow-hub repo (HTTP $CREATE_HTTP)"
+              cat /tmp/create-tooling.json
+              exit 1
+            fi
+            echo "Created: dr-workflow-hub in $TOOLING_PROJECT"
+          else
+            echo "::error::Cannot verify dr-workflow-hub repo (HTTP $HTTP)"
+            exit 1
+          fi
+
+      - name: Push workflow-hub to ADO dr-workflow-hub
+        env:
+          ADO_DR_PAT: ${{ secrets.ADO_DR_PAT }}
+        run: |
+          # Configure git remote pointing to ADO
+          git remote add ado \
+            "https://:$ADO_DR_PAT@dev.azure.com/$TOOLING_ORG_ENC/$TOOLING_PROJ_ENC/_git/dr-workflow-hub"
+
+          git push ado --force \
+            '+refs/heads/*:refs/heads/*' \
+            '+refs/tags/*:refs/tags/*'
+
+          ADO_URL="https://dev.azure.com/$TOOLING_ORG/$TOOLING_PROJECT/_git/dr-workflow-hub"
+          echo "DR tooling pushed → $ADO_URL"
+
+          {
+            echo "### DR Tooling Bootstrap → ADO \`dr-workflow-hub\`"
+            echo ""
+            echo "This repo is now mirrored at ADO. If GitHub becomes unavailable:"
+            echo ""
+            echo "1. Open ADO → **$TOOLING_PROJECT** → **Repos** → **dr-workflow-hub**"
+            echo "2. Register \`ado-pipelines/dr-github-to-ado-mirror.yml\` as an ADO Pipeline"
+            echo "3. Run it to keep GitHub repos mirrored to ADO going forward"
+            echo ""
+            echo "**ADO URL:** [$ADO_URL]($ADO_URL)"
+            echo ""
+            echo "---"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ─── FAILURE ALERTING ────────────────────────────────────────────────────────
+  notify-on-failure:
+    needs: [prepare, mirror-repos, mirror-dr-tooling]
+    if: ${{ failure() && vars.ALERTING_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send Teams alert (if configured)
+        env:
+          ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          REPO: ${{ github.repository }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          {
+            echo "## DR GitHub → ADO Mirror Failure Alert"
+            echo "- Repository: $REPO"
+            echo "- Actor: $ACTOR"
+            echo "- Run URL: $RUN_URL"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ -z "$ALERT_WEBHOOK_URL" ]; then
+            echo "ALERT_WEBHOOK_URL not configured; skipping external notification."
+            exit 0
+          fi
+
+          PAYLOAD=$(jq -cn \
+            --arg repo  "$REPO" \
+            --arg actor "$ACTOR" \
+            --arg url   "$RUN_URL" \
+            '{
+              "type": "AdaptiveCard",
+              "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+              "version": "1.4",
+              "body": [
+                {
+                  "type": "TextBlock",
+                  "size": "Medium",
+                  "weight": "Bolder",
+                  "color": "Attention",
+                  "text": "🚨 DR GitHub → ADO Mirror FAILED"
+                },
+                {
+                  "type": "FactSet",
+                  "facts": [
+                    { "title": "Repository", "value": $repo  },
+                    { "title": "Actor",      "value": $actor },
+                    { "title": "Run URL",    "value": $url   }
+                  ]
+                },
+                {
+                  "type": "ActionSet",
+                  "actions": [
+                    { "type": "Action.OpenUrl", "title": "View Run", "url": $url }
+                  ]
+                }
+              ]
+            }')
+
+          curl -sS -X POST "$ALERT_WEBHOOK_URL" \
+            -H 'Content-Type: application/json' \
+            -d "$PAYLOAD"
+          echo "Teams Adaptive Card alert sent."

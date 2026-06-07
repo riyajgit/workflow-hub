@@ -188,8 +188,8 @@ jobs:
       - name: Validate secrets
         run: |
           if [ -z "${{ secrets.GH_PAT }}" ]; then echo "ERROR: GH_PAT missing"; exit 1; fi
-          if [ "$RESTORE_TARGET" = "ado" ] && [ -z "${{ secrets.ADO_PAT }}" ]; then
-            echo "ERROR: ADO_PAT missing (required when restore_target=ado)"
+          if [ "$RESTORE_TARGET" = "ado" ] && [ -z "${{ secrets.ADO_DR_PAT }}" ]; then
+            echo "ERROR: ADO_DR_PAT missing (required when restore_target=ado)"
             exit 1
           fi
           echo "Secrets OK."
@@ -210,7 +210,7 @@ jobs:
 
       - name: Safety check — refuse if restore target already exists
         env:
-          ADO_PAT:        ${{ secrets.ADO_PAT }}
+          ADO_DR_PAT:     ${{ secrets.ADO_DR_PAT }}
           GH_TOKEN:       ${{ secrets.GH_PAT }}
           TARGET_ORG:     ${{ github.event.inputs.target_ado_org }}
           TARGET_PROJECT: ${{ github.event.inputs.target_ado_project }}
@@ -224,7 +224,7 @@ jobs:
             echo "Safety check passed — github.com/$GH_OWNER/$RESTORE_REPO does not exist yet."
           else
             HTTP=$(curl -sS -w "%{http_code}" -o /dev/null \
-              -u ":$ADO_PAT" \
+              -u ":$ADO_DR_PAT" \
               "https://dev.azure.com/$TARGET_ORG_ENC/$TARGET_PROJECT_ENC/_apis/git/repositories/$RESTORE_REPO?api-version=7.1-preview.1")
 
             if [ "$HTTP" = "200" ]; then
@@ -238,13 +238,13 @@ jobs:
       - name: Create isolated ADO repo
         if: ${{ (github.event.inputs.restore_target || 'ado') == 'ado' }}
         env:
-          ADO_PAT:        ${{ secrets.ADO_PAT }}
+          ADO_DR_PAT:     ${{ secrets.ADO_DR_PAT }}
           TARGET_ORG:     ${{ github.event.inputs.target_ado_org }}
           TARGET_PROJECT: ${{ github.event.inputs.target_ado_project }}
         run: |
           HTTP=$(curl -sS -w "%{http_code}" -o create-resp.json \
             -X POST \
-            -u ":$ADO_PAT" \
+            -u ":$ADO_DR_PAT" \
             -H "Content-Type: application/json" \
             -d "{\"name\":\"$RESTORE_REPO\"}" \
             "https://dev.azure.com/$TARGET_ORG_ENC/$TARGET_PROJECT_ENC/_apis/git/repositories?api-version=7.1-preview.1")
@@ -349,13 +349,13 @@ jobs:
       - name: Push to isolated ADO restore target
         if: ${{ (github.event.inputs.restore_target || 'ado') == 'ado' }}
         env:
-          ADO_PAT:        ${{ secrets.ADO_PAT }}
+          ADO_DR_PAT:     ${{ secrets.ADO_DR_PAT }}
           TARGET_ORG:     ${{ github.event.inputs.target_ado_org }}
           TARGET_PROJECT: ${{ github.event.inputs.target_ado_project }}
         run: |
           cd restore-mirror
           git push --force \
-            "https://:$ADO_PAT@dev.azure.com/$TARGET_ORG_ENC/$TARGET_PROJECT_ENC/_git/$RESTORE_REPO" \
+            "https://:$ADO_DR_PAT@dev.azure.com/$TARGET_ORG_ENC/$TARGET_PROJECT_ENC/_git/$RESTORE_REPO" \
             '+refs/heads/*:refs/heads/*' \
             '+refs/tags/*:refs/tags/*'
 
@@ -376,7 +376,7 @@ jobs:
 
       - name: Verify restoration (parity check)
         env:
-          ADO_PAT:        ${{ secrets.ADO_PAT }}
+          ADO_DR_PAT:     ${{ secrets.ADO_DR_PAT }}
           GH_PAT:         ${{ secrets.GH_PAT }}
           TARGET_ORG:     ${{ github.event.inputs.target_ado_org }}
           TARGET_PROJECT: ${{ github.event.inputs.target_ado_project }}
@@ -394,7 +394,7 @@ jobs:
             DEST_LABEL="GitHub restore"
             DEST_URL="https://github.com/$GH_OWNER/$RESTORE_REPO"
           else
-            DEST_REMOTE="https://:$ADO_PAT@dev.azure.com/$TARGET_ORG_ENC/$TARGET_PROJECT_ENC/_git/$RESTORE_REPO"
+            DEST_REMOTE="https://:$ADO_DR_PAT@dev.azure.com/$TARGET_ORG_ENC/$TARGET_PROJECT_ENC/_git/$RESTORE_REPO"
             DEST_LABEL="ADO restore"
             DEST_URL="https://dev.azure.com/$TARGET_ORG/$TARGET_PROJECT/_git/$RESTORE_REPO"
           fi
