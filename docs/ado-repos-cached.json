@@ -1,11 +1,17 @@
 {
   "ado_org": "binhsps",
-  "fetched_at": "2026-06-08T16:09:00Z",
+  "fetched_at": "2026-06-08T16:45:50Z",
   "fetched_by": "riyajgit",
   "projects": {
     "Test1": [
+      "DR-Config",
       "Test1",
+      "Test1.riyaj.peer.mohammed",
+      "env-tf-modules",
+      "env-tf-modules.riyaj.peer.mohammed",
+      "hostedagent",
       "mirrortest",
+      "pipelinetest",
       "selfhost"
     ],
     "Cloud Platform": [
