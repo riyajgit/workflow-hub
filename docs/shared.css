@@ -255,6 +255,32 @@ select:focus {
   white-space: nowrap;
 }
 
+/* ── Project Groups (repos page) ── */
+.project-group { margin-bottom: 18px; }
+.project-group-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: #f6f8fa;
+  border: 1px solid var(--border);
+  border-radius: 6px 6px 0 0;
+  border-bottom: none;
+}
+.project-group-check input { cursor: pointer; accent-color: var(--primary); width: 14px; height: 14px; }
+.project-group-name { font-size: 13px; font-weight: 600; color: var(--fg); flex: 1; }
+.project-group-count {
+  font-size: 11px; color: var(--muted);
+  background: #eaeef2; padding: 2px 8px; border-radius: 10px;
+}
+.project-group .repo-grid {
+  border: 1px solid var(--border);
+  border-radius: 0 0 6px 6px;
+  padding: 10px;
+  background: #fff;
+}
+.tag-project { font-weight: 600; color: var(--primary); font-size: 11px; }
+
 /* ── Table ── */
 .tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 .tbl th {

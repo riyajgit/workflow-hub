@@ -53,9 +53,9 @@
           <p class="help">Your Azure DevOps org name (not the full URL).</p>
         </div>
         <div class="field" style="margin-bottom:0">
-          <label class="lbl" for="adoProject">ADO Project</label>
+          <label class="lbl" for="adoProject">ADO Project <span style="font-weight:400;color:var(--muted)">(for Refresh)</span></label>
           <input type="text" id="adoProject" placeholder="e.g. Test1" oninput="saveAdoConfig()">
-          <p class="help">The project to list repositories from.</p>
+          <p class="help">Project to add to the repo list when you click <strong>Refresh</strong>. All cached projects are shown below.</p>
         </div>
         <div class="field" style="margin-bottom:0">
           <label class="lbl" for="ghRepo">GitHub Repository (owner/name)</label>
@@ -112,10 +112,17 @@
 
 <script>
 'use strict';
-const S = { repos: [], selected: new Set(), adoOrg: '', adoProject: '' };
+
+// S.repos    = { projectName: [repoName, ...] }  — from ado-repos-cached.json
+// S.selected = Set<"project::repo">             — composite key avoids cross-project name collisions
+const S = { repos: {}, selected: new Set(), adoOrg: '' };
 const $ = id => document.getElementById(id);
 const ghRepo = () => $('ghRepo').value.trim();
-const pat = () => $('pat').value.trim();
+const pat    = () => $('pat').value.trim();
+
+// Composite key helpers
+const toKey   = (project, repo) => `${project}::${repo}`;
+const fromKey = key => { const i = key.indexOf('::'); return [key.slice(0, i), key.slice(i + 2)]; };
 
 function showMsg(html, type = 'info') { $('globalMsg').innerHTML = `<div class="msg ${type}">${html}</div>`; }
 function clearMsg() { $('globalMsg').innerHTML = ''; }
@@ -146,20 +153,32 @@ function saveAdoConfig() {
 
 async function loadAdoCache() {
   try {
-    const res = await fetch('./ado-repos-cached.json');
+    const res  = await fetch('./ado-repos-cached.json');
     if (!res.ok) throw new Error(res.status);
     const data = await res.json();
-    S.repos      = data.repos || [];
-    S.adoOrg     = data.ado_org || '';
-    S.adoProject = data.ado_project || '';
+    S.adoOrg   = data.ado_org || '';
 
-    // Pre-fill inputs if not already set
-    if (!$('adoOrg').value)     { $('adoOrg').value     = S.adoOrg;     localStorage.setItem('dr_ado_org', S.adoOrg); }
-    if (!$('adoProject').value) { $('adoProject').value = S.adoProject; localStorage.setItem('dr_ado_project', S.adoProject); }
+    if (data.projects && typeof data.projects === 'object') {
+      // New multi-project format: { ado_org, projects: { ProjectA: [...], ProjectB: [...] } }
+      S.repos = data.projects;
+    } else if (data.ado_project && Array.isArray(data.repos)) {
+      // Old single-project format: { ado_org, ado_project, repos: [...] }
+      S.repos = { [data.ado_project]: data.repos };
+    } else {
+      S.repos = {};
+    }
 
-    $('cacheMeta').textContent = `Last refreshed: ${data.fetched_at || 'unknown'} by ${data.fetched_by || '—'} | Org: ${S.adoOrg} / Project: ${S.adoProject}`;
-    $('connStatus').textContent = `${S.adoOrg} / ${S.adoProject}`;
+    // Pre-fill org if not already set
+    if (!$('adoOrg').value && S.adoOrg) {
+      $('adoOrg').value = S.adoOrg;
+      localStorage.setItem('dr_ado_org', S.adoOrg);
+    }
+
+    const projectCount = Object.keys(S.repos).length;
+    const repoCount    = Object.values(S.repos).flat().length;
+    $('connStatus').textContent = `${S.adoOrg} — ${projectCount} project${projectCount !== 1 ? 's' : ''}, ${repoCount} repos`;
     $('connStatus').style.color = 'var(--success)';
+    $('cacheMeta').textContent  = `Last refreshed: ${data.fetched_at || 'unknown'} by ${data.fetched_by || '—'} · ${repoCount} repos across ${projectCount} project${projectCount !== 1 ? 's' : ''}`;
     renderRepos();
   } catch (_) {
     $('repoArea').innerHTML = '<div class="msg warning"><strong>ado-repos-cached.json not found.</strong><br>Enter your ADO Org and Project above, then click <strong>&#8635; Refresh from ADO</strong>.</div>';
@@ -171,49 +190,113 @@ async function loadCurrentSelection() {
     const res = await fetch('./repos.json');
     if (!res.ok) return;
     const current = await res.json();
-    current.filter(r => r.enabled !== false).forEach(r => S.selected.add(r.ado_repo));
+    current.filter(r => r.enabled !== false)
+           .forEach(r => S.selected.add(toKey(r.ado_project, r.ado_repo)));
     renderRepos();
     renderTags();
   } catch (_) {}
 }
 
 function renderRepos() {
-  if (!S.repos.length) return;
-  $('repoArea').innerHTML = '<div class="repo-grid">' +
-    S.repos.map(name => {
-      const on = S.selected.has(name);
-      const esc = name.replace(/'/g, "\\'").replace(/"/g, '&quot;');
-      return `<label class="repo-tile${on ? ' on' : ''}" id="tile-${CSS.escape(name)}">` +
-        `<input type="checkbox" ${on ? 'checked' : ''} onchange="toggle('${esc}',this.checked)">` +
+  const projects = Object.keys(S.repos);
+  if (!projects.length) return;
+
+  $('repoArea').innerHTML = projects.map(project => {
+    const repos  = S.repos[project] || [];
+    const allOn  = repos.length > 0 && repos.every(r => S.selected.has(toKey(project, r)));
+    const pEsc   = project.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+
+    const tiles = repos.map(name => {
+      const key  = toKey(project, name);
+      const on   = S.selected.has(key);
+      const nEsc = name.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+      return `<label class="repo-tile${on ? ' on' : ''}" id="tile-${CSS.escape(key)}">` +
+        `<input type="checkbox" ${on ? 'checked' : ''} onchange="toggle('${pEsc}','${nEsc}',this.checked)">` +
         `<span class="rname" title="${name}">${name}</span></label>`;
-    }).join('') + '</div>';
+    }).join('');
+
+    return `<div class="project-group">` +
+      `<div class="project-group-header">` +
+        `<label class="project-group-check" title="Select all repos in ${pEsc}">` +
+          `<input type="checkbox" id="hdr-${CSS.escape(project)}" ${allOn ? 'checked' : ''} ` +
+            `onchange="selectProject('${pEsc}',this.checked)">` +
+        `</label>` +
+        `<span class="project-group-name">&#128193; ${project}</span>` +
+        `<span class="project-group-count">${repos.length} repo${repos.length !== 1 ? 's' : ''}</span>` +
+      `</div>` +
+      `<div class="repo-grid">${tiles}</div>` +
+    `</div>`;
+  }).join('');
+
+  // Set indeterminate on project checkboxes (cannot be set via HTML attr)
+  projects.forEach(project => {
+    const repos  = S.repos[project] || [];
+    const allOn  = repos.length > 0 && repos.every(r => S.selected.has(toKey(project, r)));
+    const someOn = repos.some(r => S.selected.has(toKey(project, r)));
+    const cb = document.getElementById('hdr-' + CSS.escape(project));
+    if (cb) cb.indeterminate = someOn && !allOn;
+  });
 }
 
 function renderTags() {
   $('selTags').innerHTML = S.selected.size
-    ? '<div class="tags">' + [...S.selected].map(n => `<span class="tag">${n}</span>`).join('') + '</div>'
+    ? '<div class="tags">' + [...S.selected].map(key => {
+        const [proj, repo] = fromKey(key);
+        return `<span class="tag"><span class="tag-project">${proj}</span> / ${repo}</span>`;
+      }).join('') + '</div>'
     : '<p class="empty">No repos selected.</p>';
 }
 
-function toggle(name, checked) {
-  checked ? S.selected.add(name) : S.selected.delete(name);
-  const t = $('tile-' + CSS.escape(name));
+function toggle(project, name, checked) {
+  const key = toKey(project, name);
+  checked ? S.selected.add(key) : S.selected.delete(key);
+  const t = document.getElementById('tile-' + CSS.escape(key));
   if (t) t.classList.toggle('on', checked);
+  _updateProjectHeader(project);
   renderTags();
+}
+
+function selectProject(project, checked) {
+  (S.repos[project] || []).forEach(name => {
+    const key = toKey(project, name);
+    checked ? S.selected.add(key) : S.selected.delete(key);
+    const t = document.getElementById('tile-' + CSS.escape(key));
+    if (t) { t.classList.toggle('on', checked); t.querySelector('input').checked = checked; }
+  });
+  renderTags();
+}
+
+function _updateProjectHeader(project) {
+  const repos  = S.repos[project] || [];
+  const allOn  = repos.length > 0 && repos.every(r => S.selected.has(toKey(project, r)));
+  const someOn = repos.some(r => S.selected.has(toKey(project, r)));
+  const cb = document.getElementById('hdr-' + CSS.escape(project));
+  if (!cb) return;
+  cb.checked       = allOn;
+  cb.indeterminate = someOn && !allOn;
 }
 
 function clearAll() {
   S.selected.clear();
-  document.querySelectorAll('.repo-tile').forEach(t => t.classList.remove('on'));
-  document.querySelectorAll('.repo-tile input').forEach(cb => { cb.checked = false; });
+  document.querySelectorAll('.repo-tile').forEach(t => {
+    t.classList.remove('on');
+    t.querySelector('input').checked = false;
+  });
+  document.querySelectorAll('.project-group-header input[type=checkbox]').forEach(cb => {
+    cb.checked = false; cb.indeterminate = false;
+  });
   renderTags();
 }
 
 function selectAll() {
-  S.repos.forEach(name => {
-    S.selected.add(name);
-    const t = $('tile-' + CSS.escape(name));
-    if (t) { t.classList.add('on'); t.querySelector('input').checked = true; }
+  Object.entries(S.repos).forEach(([project, repos]) => {
+    repos.forEach(name => {
+      const key = toKey(project, name);
+      S.selected.add(key);
+      const t = document.getElementById('tile-' + CSS.escape(key));
+      if (t) { t.classList.add('on'); t.querySelector('input').checked = true; }
+    });
+    _updateProjectHeader(project);
   });
   renderTags();
 }
@@ -248,8 +331,8 @@ function updatePatStatus() {
   else { el.textContent = 'No PAT saved — enter one below to enable Save and Refresh.'; el.className = 'pat-status none'; }
 }
 
-function getAdoOrg()     { return $('adoOrg').value.trim()     || S.adoOrg; }
-function getAdoProject() { return $('adoProject').value.trim() || S.adoProject; }
+function getAdoOrg()     { return $('adoOrg').value.trim()    || S.adoOrg; }
+function getAdoProject() { return $('adoProject').value.trim(); }
 
 function triggerRefresh() { requirePat(_doRefresh); }
 async function _doRefresh() {
@@ -257,14 +340,14 @@ async function _doRefresh() {
   const org     = getAdoOrg();
   const project = getAdoProject();
   if (!org)     { showMsg('Enter an ADO Organization in the connection card above.', 'error'); return; }
-  if (!project) { showMsg('Enter an ADO Project in the connection card above.', 'error'); return; }
-  showMsg('<span class="spinner"></span>&nbsp;Triggering ADO repo refresh&hellip;');
+  if (!project) { showMsg('Enter an ADO Project to refresh in the connection card above.', 'error'); return; }
+  showMsg('<span class="spinner"></span>&nbsp;Triggering ADO repo refresh for <strong>' + project + '</strong>&hellip;');
   try {
     const res = await fetch(`https://api.github.com/repos/${ghRepo()}/actions/workflows/dr-list-repos.yml/dispatches`,
       { method: 'POST', headers: { ...apiHeaders(), 'Content-Type': 'application/json' },
         body: JSON.stringify({ ref: 'main', inputs: { ado_org: org, ado_project: project } }) });
     if (res.status === 204) {
-      showMsg('Refresh workflow triggered &#10003;<br>Wait ~30 seconds, then reload this page to see the updated list.', 'success');
+      showMsg(`Refresh triggered for <strong>${org}/${project}</strong> &#10003;<br>Wait ~30 seconds, then reload this page to see the updated list.`, 'success');
     } else throw new Error(`HTTP ${res.status}: ${await res.text()}`);
   } catch (e) { showMsg(`Refresh failed: ${e.message}`, 'error'); }
 }
@@ -275,19 +358,44 @@ function saveSelection() {
 }
 async function _doSave() {
   if (!ghRepo()) { showMsg('Set the GitHub Repository in the Configuration card above.', 'error'); return; }
-  const org     = getAdoOrg();
-  const project = getAdoProject();
-  if (!org)     { showMsg('Enter an ADO Organization in the connection card above.', 'error'); return; }
-  if (!project) { showMsg('Enter an ADO Project in the connection card above.', 'error'); return; }
-  const repoList = [...S.selected].join(',');
-  showMsg('<span class="spinner"></span>&nbsp;Saving selection&hellip;');
+  const org = getAdoOrg();
+  if (!org) { showMsg('Enter an ADO Organization in the connection card above.', 'error'); return; }
+
+  // Build repos.json: one entry per selected repo, sorted by project then repo name
+  const repoList = [...S.selected].map(key => {
+    const [project, repo] = fromKey(key);
+    return { ado_org: org, ado_project: project, ado_repo: repo, enabled: true };
+  }).sort((a, b) => a.ado_project.localeCompare(b.ado_project) || a.ado_repo.localeCompare(b.ado_repo));
+
+  const encoded = btoa(unescape(encodeURIComponent(JSON.stringify(repoList, null, 2))));
+  showMsg('<span class="spinner"></span>&nbsp;Saving selection to repos.json&hellip;');
   try {
-    const res = await fetch(`https://api.github.com/repos/${ghRepo()}/actions/workflows/dr-select-repos.yml/dispatches`,
-      { method: 'POST', headers: { ...apiHeaders(), 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ref: 'main', inputs: { ado_org: org, ado_project: project, repos_to_mirror: repoList } }) });
-    if (res.status === 204) {
-      showMsg(`Selection saved &#10003; &mdash; <strong>${repoList}</strong><br>The <em>dr-select-repos</em> workflow is running and will update <code>repos.json</code>. Reload in ~30 seconds to confirm.`, 'success');
-    } else throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+    // Fetch current SHA so GitHub accepts the PUT as an update
+    let sha = null;
+    const getRes = await fetch(`https://api.github.com/repos/${ghRepo()}/contents/repos.json`, { headers: apiHeaders() });
+    if (getRes.ok) { const d = await getRes.json(); sha = d.sha; }
+
+    const body = {
+      message: `chore(dr): update repo selection \u2014 ${S.selected.size} repos enabled`,
+      content: encoded,
+      branch: 'main'
+    };
+    if (sha) body.sha = sha;
+
+    const putRes = await fetch(`https://api.github.com/repos/${ghRepo()}/contents/repos.json`, {
+      method: 'PUT',
+      headers: { ...apiHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    if (putRes.ok) {
+      const summary = [...S.selected].reduce((acc, key) => {
+        const [proj] = fromKey(key); acc[proj] = (acc[proj] || 0) + 1; return acc;
+      }, {});
+      const summaryText = Object.entries(summary).map(([p, n]) => `${p}: ${n}`).join(' \u00b7 ');
+      showMsg(`repos.json saved &#10003; \u2014 <strong>${S.selected.size} repos</strong> enabled for daily mirror.<br><small>${summaryText}</small>`, 'success');
+    } else {
+      throw new Error(`HTTP ${putRes.status}: ${await putRes.text()}`);
+    }
   } catch (e) { showMsg(`Save failed: ${e.message}`, 'error'); }
 }
 </script>
