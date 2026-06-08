@@ -2,9 +2,17 @@ name: DR - Cache ADO Repo List
 
 # PURPOSE: Fetches the live repo list from Azure DevOps and saves it to
 #          ado-repos-cached.json so the GitHub Pages UI can display it.
-#          Trigger this manually (or from the UI) before making a selection.
+#
+# MODES:
+#   ado_projects = "all"          → discovers every project in the org and fetches all repos
+#   ado_projects = "Test1"        → refreshes just that one project (merges into existing cache)
+#   ado_projects = "Test1,Proj2"  → refreshes those projects only
+#
+# SCHEDULE: Daily at 17:30 UTC (auto-keeps the cache fresh)
 
 on:
+  schedule:
+    - cron: '30 17 * * *'
   workflow_dispatch:
     inputs:
       ado_org:
@@ -12,10 +20,10 @@ on:
         required: true
         default: 'binhsps'
         type: string
-      ado_project:
-        description: Azure DevOps project name
-        required: true
-        default: 'Test1'
+      ado_projects:
+        description: 'Project(s) to refresh — comma-separated names, or "all" for every project'
+        required: false
+        default: 'all'
         type: string
 
 permissions:
@@ -24,6 +32,10 @@ permissions:
 jobs:
   cache-repos:
     runs-on: ubuntu-latest
+    env:
+      ADO_ORG:      ${{ github.event.inputs.ado_org || 'binhsps' }}
+      ADO_PROJECTS: ${{ github.event.inputs.ado_projects || 'all' }}
+      ADO_PAT:      ${{ secrets.ADO_PAT }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -31,8 +43,6 @@ jobs:
           fetch-depth: 0
 
       - name: Validate secrets
-        env:
-          ADO_PAT: ${{ secrets.ADO_PAT }}
         run: |
           if [ -z "$ADO_PAT" ]; then
             echo "ERROR: ADO_PAT secret is missing."
@@ -40,60 +50,116 @@ jobs:
           fi
           echo "Secrets OK."
 
-      - name: Fetch repos from Azure DevOps and cache
-        env:
-          ADO_ORG: ${{ github.event.inputs.ado_org }}
-          ADO_PROJECT: ${{ github.event.inputs.ado_project }}
-          ADO_PAT: ${{ secrets.ADO_PAT }}
+      - name: Resolve project list
         run: |
-          # URL-encode org and project so names with spaces/special chars work in URLs
           ADO_ORG_ENC=$(python3 -c "import urllib.parse, os; print(urllib.parse.quote(os.environ['ADO_ORG'], safe=''))")
-          ADO_PROJECT_ENC=$(python3 -c "import urllib.parse, os; print(urllib.parse.quote(os.environ['ADO_PROJECT'], safe=''))")
-          echo "Fetching repos for: $ADO_ORG / $ADO_PROJECT"
-          HTTP_CODE=$(curl -sS -w "%{http_code}" -o ado-raw.json \
-            -u ":$ADO_PAT" \
-            "https://dev.azure.com/$ADO_ORG_ENC/$ADO_PROJECT_ENC/_apis/git/repositories?api-version=7.1-preview.1")
+          echo "ADO_ORG_ENC=$ADO_ORG_ENC" >> "$GITHUB_ENV"
 
-          if [ "$HTTP_CODE" != "200" ]; then
-            echo "ERROR: Azure DevOps API returned HTTP $HTTP_CODE"
-            cat ado-raw.json
-            exit 1
+          if [ "$ADO_PROJECTS" = "all" ]; then
+            echo "Mode: all projects — fetching project list from org..."
+            HTTP=$(curl -sS -w "%{http_code}" -o /tmp/all-projects.json \
+              -u ":$ADO_PAT" \
+              "https://dev.azure.com/$ADO_ORG_ENC/_apis/projects?api-version=7.1&\$top=500")
+            if [ "$HTTP" != "200" ]; then
+              echo "ERROR: Cannot list projects (HTTP $HTTP)"
+              cat /tmp/all-projects.json
+              exit 1
+            fi
+            PROJECT_LIST=$(jq -r '[.value[].name] | join(",")' /tmp/all-projects.json)
+            PROJECT_COUNT=$(jq '.value | length' /tmp/all-projects.json)
+            echo "Found $PROJECT_COUNT projects: $PROJECT_LIST"
+          else
+            PROJECT_LIST="$ADO_PROJECTS"
+            echo "Mode: specified projects — $PROJECT_LIST"
+          fi
+          echo "PROJECT_LIST=$PROJECT_LIST" >> "$GITHUB_ENV"
+
+      - name: Fetch repos for each project and build cache
+        run: |
+          # Load existing cache (if any) to merge into
+          if [ -f "docs/ado-repos-cached.json" ]; then
+            # Support both old single-project and new multi-project formats
+            if jq -e '.projects' docs/ado-repos-cached.json > /dev/null 2>&1; then
+              EXISTING=$(jq '.projects' docs/ado-repos-cached.json)
+            elif jq -e '.ado_project' docs/ado-repos-cached.json > /dev/null 2>&1; then
+              # Migrate old format: wrap it into projects object
+              OLD_PROJECT=$(jq -r '.ado_project' docs/ado-repos-cached.json)
+              OLD_REPOS=$(jq '.repos' docs/ado-repos-cached.json)
+              EXISTING=$(jq -n --arg p "$OLD_PROJECT" --argjson r "$OLD_REPOS" '{($p): $r}')
+            else
+              EXISTING='{}'
+            fi
+          else
+            EXISTING='{}'
           fi
 
-          REPO_COUNT=$(jq '.value | length' ado-raw.json)
-          echo "Found $REPO_COUNT repositories in $ADO_ORG/$ADO_PROJECT."
+          echo "$EXISTING" > /tmp/existing-projects.json
+
+          TOTAL_REPOS=0
+          UPDATED_PROJECTS=""
+          RESULT_PROJECTS=$(cat /tmp/existing-projects.json)
+
+          IFS=',' read -ra PROJECTS <<< "$PROJECT_LIST"
+          for PROJECT in "${PROJECTS[@]}"; do
+            PROJECT=$(echo "$PROJECT" | xargs)  # trim whitespace
+            PROJECT_ENC=$(python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$PROJECT")
+
+            echo "── Fetching: $ADO_ORG / $PROJECT ──"
+            HTTP=$(curl -sS -w "%{http_code}" -o /tmp/proj-repos.json \
+              -u ":$ADO_PAT" \
+              "https://dev.azure.com/$ADO_ORG_ENC/$PROJECT_ENC/_apis/git/repositories?api-version=7.1-preview.1")
+
+            if [ "$HTTP" = "200" ]; then
+              COUNT=$(jq '.value | length' /tmp/proj-repos.json)
+              REPO_NAMES=$(jq '[.value[].name] | sort | unique' /tmp/proj-repos.json)
+              echo "  $COUNT repos found"
+              jq -r '.[] ' <<< "$REPO_NAMES" | sed 's/^/    - /'
+              RESULT_PROJECTS=$(jq --arg p "$PROJECT" --argjson r "$REPO_NAMES" \
+                '. + {($p): $r}' <<< "$RESULT_PROJECTS")
+              TOTAL_REPOS=$((TOTAL_REPOS + COUNT))
+              UPDATED_PROJECTS="$UPDATED_PROJECTS $PROJECT"
+            elif [ "$HTTP" = "401" ] || [ "$HTTP" = "403" ]; then
+              echo "  ::warning::Skipped '$PROJECT' — ADO_PAT lacks access (HTTP $HTTP)"
+            elif [ "$HTTP" = "404" ]; then
+              echo "  ::warning::Skipped '$PROJECT' — project not found (HTTP $HTTP)"
+            else
+              echo "  ::warning::Skipped '$PROJECT' — unexpected HTTP $HTTP"
+            fi
+          done
+
+          PROJECT_COUNT=$(jq 'keys | length' <<< "$RESULT_PROJECTS")
+          echo "Total: $TOTAL_REPOS repos across $PROJECT_COUNT projects"
 
           jq -n \
-            --arg org     "$ADO_ORG" \
-            --arg project "$ADO_PROJECT" \
-            --arg ts      "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
-            --arg actor   "${{ github.actor }}" \
-            --argjson repos "$(jq '[.value[].name] | sort | unique' ado-raw.json)" \
+            --arg org       "$ADO_ORG" \
+            --arg ts        "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+            --arg actor     "${{ github.actor }}" \
+            --argjson projects "$RESULT_PROJECTS" \
             '{
-              ado_org:     $org,
-              ado_project: $project,
-              fetched_at:  $ts,
-              fetched_by:  $actor,
-              repos:       $repos
-            }' > ado-repos-cached.json
+              ado_org:    $org,
+              fetched_at: $ts,
+              fetched_by: $actor,
+              projects:   $projects
+            }' > /tmp/new-cache.json
 
-          echo "Cached repos:"
-          jq -r '.repos[]' ado-repos-cached.json | nl -ba
+          echo "TOTAL_REPOS=$TOTAL_REPOS"         >> "$GITHUB_ENV"
+          echo "PROJECT_COUNT=$PROJECT_COUNT"      >> "$GITHUB_ENV"
+          echo "UPDATED_PROJECTS=$UPDATED_PROJECTS" >> "$GITHUB_ENV"
 
+          # Write step summary
           {
             echo "## ADO Repo Cache Updated"
-            echo "**Org:** \`$ADO_ORG\` | **Project:** \`$ADO_PROJECT\`"
+            echo "**Org:** \`$ADO_ORG\` | **Projects:** $PROJECT_COUNT | **Total repos:** $TOTAL_REPOS"
             echo "**Fetched at:** $(date -u '+%Y-%m-%d %H:%M UTC')"
             echo ""
-            echo "**Repos found ($(jq '.repos | length' ado-repos-cached.json)):**"
-            jq -r '.repos[] | "- `" + . + "`"' ado-repos-cached.json
+            jq -r 'to_entries[] | "### 📁 " + .key + " (" + (.value | length | tostring) + " repos)\n" + (.value[] | "- `" + . + "`")' <<< "$RESULT_PROJECTS"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Publish cache and commit
         run: |
-          # Copy to docs/ so GitHub Pages serves it without auth
           mkdir -p docs
-          cp ado-repos-cached.json docs/ado-repos-cached.json
+          cp /tmp/new-cache.json ado-repos-cached.json
+          cp /tmp/new-cache.json docs/ado-repos-cached.json
 
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -101,7 +167,7 @@ jobs:
           if git diff --cached --quiet; then
             echo "No changes to repo cache."
           else
-            git commit -m "chore(dr): refresh ADO repo cache [${{ github.actor }}]"
+            git commit -m "chore(dr): refresh ADO repo cache — $PROJECT_COUNT projects, $TOTAL_REPOS repos [${{ github.actor }}]"
             git push origin "HEAD:${GITHUB_REF_NAME}"
-            echo "ado-repos-cached.json updated (root + docs/)."
+            echo "ado-repos-cached.json updated."
           fi
