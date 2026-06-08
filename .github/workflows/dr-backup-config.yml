@@ -462,22 +462,26 @@ jobs:
           WIKI_MIRROR_RESULTS=""
 
           while IFS= read -r WIKI_NAME; do
-            REMOTE_URL=$(jq -r --arg n "$WIKI_NAME" \
-              '.value[] | select(.name == $n) | .remoteUrl' \
-              "$BACKUP_DIR/wiki-repos.json")
             WIKI_TYPE=$(jq -r --arg n "$WIKI_NAME" \
               '.value[] | select(.name == $n) | .type' \
               "$BACKUP_DIR/wiki-repos.json")
 
-            # Inject ADO PAT into the clone URL for auth
-            ADO_CLONE_URL="https://:${ADO_PAT}@${REMOTE_URL#https://}"
+            # The ADO Wiki API returns a web browse URL in remoteUrl (GUID-based),
+            # NOT the git clone URL. Build the correct git URL from org/project/name.
+            #   projectWiki → https://dev.azure.com/{org}/{project}/_git/{wiki.name}
+            #   codeWiki    → same pattern; the wiki folder lives inside that repo
+            WIKI_NAME_ENC=$(python3 -c \
+              "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1], safe=''))" \
+              "$WIKI_NAME")
+            GIT_URL="https://dev.azure.com/$ADO_ORG_ENC/$ADO_PROJECT_ENC/_git/$WIKI_NAME_ENC"
+            ADO_CLONE_URL="https://:${ADO_PAT}@dev.azure.com/$ADO_ORG_ENC/$ADO_PROJECT_ENC/_git/$WIKI_NAME_ENC"
 
             # GitHub backup repo name: ProjectName.wiki → ProjectName.wiki_backup
             BACKUP_REPO="${WIKI_NAME}_backup"
 
             echo ""
             echo "── $WIKI_NAME ($WIKI_TYPE) ──"
-            echo "   Source : $REMOTE_URL"
+            echo "   Source : $GIT_URL"
             echo "   Target : github.com/$GH_OWNER/$BACKUP_REPO"
 
             # Create GitHub backup repo if it does not already exist
@@ -489,7 +493,7 @@ jobs:
 
             # Clone wiki as a bare mirror from ADO
             CLONE_DIR="wiki-clone-$(echo "$WIKI_NAME" | tr '/' '-' | tr ' ' '_')"
-            if git clone --mirror "$ADO_CLONE_URL" "$CLONE_DIR" 2>/dev/null; then
+            if git clone --mirror "$ADO_CLONE_URL" "$CLONE_DIR" 2>&1; then
               # Push all branches and tags to GitHub backup
               git -C "$CLONE_DIR" push --force \
                 "https://x-access-token:$GH_PAT@github.com/$GH_OWNER/${BACKUP_REPO}.git" \
@@ -498,8 +502,9 @@ jobs:
               echo "   ✓ Content mirrored → github.com/$GH_OWNER/$BACKUP_REPO"
               WIKI_MIRROR_RESULTS="$WIKI_MIRROR_RESULTS\n✅ $WIKI_NAME → $BACKUP_REPO"
             else
-              echo "   ✗ Clone failed for $WIKI_NAME (may be empty or inaccessible)"
-              WIKI_MIRROR_RESULTS="$WIKI_MIRROR_RESULTS\n⚠️ $WIKI_NAME — clone failed (empty wiki?)"
+              echo "   ✗ Clone failed — URL: $GIT_URL"
+              echo "   Possible causes: wiki has no pages yet, or ADO_PAT is missing Code — Read scope"
+              WIKI_MIRROR_RESULTS="$WIKI_MIRROR_RESULTS\n⚠️ $WIKI_NAME — clone failed (no pages yet, or PAT missing Code-Read)"
             fi
           done < <(jq -r '.value[].name' "$BACKUP_DIR/wiki-repos.json")
 
