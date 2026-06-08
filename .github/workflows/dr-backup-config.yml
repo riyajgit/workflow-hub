@@ -146,24 +146,31 @@ jobs:
             fi
           }
 
-          check_scope "Build (Read)"           \
-            "https://dev.azure.com/$ADO_ORG_ENC/$ADO_PROJECT_ENC/_apis/build/definitions?api-version=7.1&\$top=1" \
-            /tmp/pf-build.json
-          check_scope "Release (Read)"         \
-            "https://vsrm.dev.azure.com/$ADO_ORG_ENC/$ADO_PROJECT_ENC/_apis/release/definitions?api-version=7.1&\$top=1" \
-            /tmp/pf-release.json
-          check_scope "Variable Groups (Read)" \
-            "https://dev.azure.com/$ADO_ORG_ENC/$ADO_PROJECT_ENC/_apis/distributedtask/variablegroups?api-version=7.1&\$top=1" \
-            /tmp/pf-vg.json
-          check_scope "Service Connections (Read)" \
-            "https://dev.azure.com/$ADO_ORG_ENC/$ADO_PROJECT_ENC/_apis/serviceendpoint/endpoints?api-version=7.1&\$top=1" \
-            /tmp/pf-sc.json
-          check_scope "Environments (Read)"    \
-            "https://dev.azure.com/$ADO_ORG_ENC/$ADO_PROJECT_ENC/_apis/distributedtask/environments?api-version=7.1&\$top=1" \
-            /tmp/pf-env.json
-          check_scope "Dashboards (Read)"      \
-            "https://dev.azure.com/$ADO_ORG_ENC/$ADO_PROJECT_ENC/_apis/dashboard/dashboards?api-version=7.1" \
-            /tmp/pf-dash.json
+          # ── Scope checks — only Wiki is active; others re-enable as PAT scopes are added ──
+          # TODO: uncomment when PAT has Build — Read
+          # check_scope "Build (Read)" \
+          #   "https://dev.azure.com/$ADO_ORG_ENC/$ADO_PROJECT_ENC/_apis/build/definitions?api-version=7.1&$top=1" \
+          #   /tmp/pf-build.json
+          # TODO: uncomment when PAT has Release — Read
+          # check_scope "Release (Read)" \
+          #   "https://vsrm.dev.azure.com/$ADO_ORG_ENC/$ADO_PROJECT_ENC/_apis/release/definitions?api-version=7.1&$top=1" \
+          #   /tmp/pf-release.json
+          # TODO: uncomment when PAT has Variable Groups — Read
+          # check_scope "Variable Groups (Read)" \
+          #   "https://dev.azure.com/$ADO_ORG_ENC/$ADO_PROJECT_ENC/_apis/distributedtask/variablegroups?api-version=7.1&$top=1" \
+          #   /tmp/pf-vg.json
+          # TODO: uncomment when PAT has Service Connections — Read
+          # check_scope "Service Connections (Read)" \
+          #   "https://dev.azure.com/$ADO_ORG_ENC/$ADO_PROJECT_ENC/_apis/serviceendpoint/endpoints?api-version=7.1&$top=1" \
+          #   /tmp/pf-sc.json
+          # TODO: uncomment when PAT has Environments — Read
+          # check_scope "Environments (Read)" \
+          #   "https://dev.azure.com/$ADO_ORG_ENC/$ADO_PROJECT_ENC/_apis/distributedtask/environments?api-version=7.1&$top=1" \
+          #   /tmp/pf-env.json
+          # TODO: uncomment when PAT has Dashboards — Read
+          # check_scope "Dashboards (Read)" \
+          #   "https://dev.azure.com/$ADO_ORG_ENC/$ADO_PROJECT_ENC/_apis/dashboard/dashboards?api-version=7.1" \
+          #   /tmp/pf-dash.json
           check_scope "Wiki (Read)"            \
             "https://dev.azure.com/$ADO_ORG_ENC/$ADO_PROJECT_ENC/_apis/wiki/wikis?api-version=7.1" \
             /tmp/pf-wiki.json
@@ -173,27 +180,22 @@ jobs:
           check_scope "Branch Policies (Read)" \
             "https://dev.azure.com/$ADO_ORG_ENC/$ADO_PROJECT_ENC/_apis/policy/configurations?api-version=7.1&\$top=1" \
             /tmp/pf-policy.json
-          check_scope "Work Item Types (Read)" \
-            "https://dev.azure.com/$ADO_ORG_ENC/$ADO_PROJECT_ENC/_apis/wit/workitemtypes?api-version=7.1" \
-            /tmp/pf-wit.json
+          # TODO: uncomment when PAT has Work Items — Read
+          # check_scope "Work Item Types (Read)" \
+          #   "https://dev.azure.com/$ADO_ORG_ENC/$ADO_PROJECT_ENC/_apis/wit/workitemtypes?api-version=7.1" \
+          #   /tmp/pf-wit.json
 
           echo ""
           if [ "$FAIL" = "1" ]; then
             echo "::error::One or more required PAT scopes are missing."
-            echo "Create a new ADO PAT with ALL of these scopes:"
-            echo "  • Build — Read"
-            echo "  • Release — Read"
-            echo "  • Variable Groups — Read, create, & manage"
-            echo "  • Service Connections — Read, query, & manage"
-            echo "  • Environments — Read & manage"
-            echo "  • Work Items — Read  (needed for dashboards + work items backup)"
+            echo "ADO_PAT currently needs:"
             echo "  • Wiki — Read & write"
             echo "  • Agent Pools — Read"
             echo "  • Code — Read  (for wiki content clone + branch policies)"
             echo "Then update the ADO_PAT secret in GitHub Settings → Secrets → Actions."
             exit 1
           fi
-          echo "=== All scope checks passed — proceeding with backup ==="
+          echo "=== Scope checks passed — proceeding with wiki backup ==="
 
       - name: Create backup directories
         run: |
@@ -210,6 +212,7 @@ jobs:
       # Non-200 responses are treated as "0 items" (project may not use that feature).
 
       - name: Export build pipeline definitions
+        if: false   # TODO: enable when ADO_PAT has Build — Read scope
         env:
           ADO_PAT: ${{ secrets.ADO_PAT }}
         run: |
@@ -227,6 +230,7 @@ jobs:
           echo "BUILD_PIPELINE_COUNT=$COUNT" >> "$GITHUB_ENV"
 
       - name: Export release pipeline definitions
+        if: false   # TODO: enable when ADO_PAT has Release — Read scope
         env:
           ADO_PAT: ${{ secrets.ADO_PAT }}
         run: |
@@ -245,6 +249,7 @@ jobs:
           echo "RELEASE_PIPELINE_COUNT=$COUNT" >> "$GITHUB_ENV"
 
       - name: Export variable groups
+        if: false   # TODO: enable when ADO_PAT has Variable Groups — Read scope
         env:
           ADO_PAT: ${{ secrets.ADO_PAT }}
         run: |
@@ -262,6 +267,7 @@ jobs:
           echo "VARIABLE_GROUP_COUNT=$COUNT" >> "$GITHUB_ENV"
 
       - name: Export service connections
+        if: false   # TODO: enable when ADO_PAT has Service Connections — Read scope
         env:
           ADO_PAT: ${{ secrets.ADO_PAT }}
         run: |
@@ -279,6 +285,7 @@ jobs:
           echo "SERVICE_CONNECTION_COUNT=$COUNT" >> "$GITHUB_ENV"
 
       - name: Export environments
+        if: false   # TODO: enable when ADO_PAT has Environments — Read scope
         env:
           ADO_PAT: ${{ secrets.ADO_PAT }}
         run: |
@@ -296,6 +303,7 @@ jobs:
           echo "ENVIRONMENT_COUNT=$COUNT" >> "$GITHUB_ENV"
 
       - name: Export dashboards
+        if: false   # TODO: enable when ADO_PAT has Dashboards — Read scope
         env:
           ADO_PAT: ${{ secrets.ADO_PAT }}
         run: |
@@ -313,6 +321,7 @@ jobs:
           echo "DASHBOARD_COUNT=$COUNT" >> "$GITHUB_ENV"
 
       - name: Export branch policies
+        if: false   # TODO: enable when ADO_PAT has Policy — Read scope
         env:
           ADO_PAT: ${{ secrets.ADO_PAT }}
         run: |
@@ -334,6 +343,7 @@ jobs:
           echo "BRANCH_POLICY_COUNT=$COUNT" >> "$GITHUB_ENV"
 
       - name: Export work items
+        if: false   # TODO: enable when ADO_PAT has Work Items — Read scope
         env:
           ADO_PAT: ${{ secrets.ADO_PAT }}
         run: |
@@ -501,6 +511,7 @@ jobs:
           echo "EOF"                       >> "$GITHUB_ENV"
 
       - name: Export agent pools (org-level)
+        if: false   # TODO: enable when ADO_PAT has Agent Pools — Read scope
         env:
           ADO_PAT: ${{ secrets.ADO_PAT }}
         run: |
@@ -533,16 +544,16 @@ jobs:
             --arg actor              "${{ github.actor }}" \
             --arg gh_repo            "${{ github.repository }}" \
             --arg run_url            "$GH_RUN_URL" \
-            --argjson build_pipelines     "$BUILD_PIPELINE_COUNT" \
-            --argjson release_pipelines   "$RELEASE_PIPELINE_COUNT" \
-            --argjson variable_groups     "$VARIABLE_GROUP_COUNT" \
-            --argjson service_connections "$SERVICE_CONNECTION_COUNT" \
-            --argjson environments        "$ENVIRONMENT_COUNT" \
-            --argjson dashboards          "$DASHBOARD_COUNT" \
-            --argjson branch_policies     "$BRANCH_POLICY_COUNT" \
-            --argjson work_items          "$WORK_ITEM_COUNT" \
-            --argjson wiki_repos          "$WIKI_COUNT" \
-            --argjson agent_pools         "$AGENT_POOL_COUNT" \
+            --argjson build_pipelines     "${BUILD_PIPELINE_COUNT:-0}" \
+            --argjson release_pipelines   "${RELEASE_PIPELINE_COUNT:-0}" \
+            --argjson variable_groups     "${VARIABLE_GROUP_COUNT:-0}" \
+            --argjson service_connections "${SERVICE_CONNECTION_COUNT:-0}" \
+            --argjson environments        "${ENVIRONMENT_COUNT:-0}" \
+            --argjson dashboards          "${DASHBOARD_COUNT:-0}" \
+            --argjson branch_policies     "${BRANCH_POLICY_COUNT:-0}" \
+            --argjson work_items          "${WORK_ITEM_COUNT:-0}" \
+            --argjson wiki_repos          "${WIKI_COUNT:-0}" \
+            --argjson agent_pools         "${AGENT_POOL_COUNT:-0}" \
             '{
               ado_org:     $org,
               ado_project: $project,
@@ -573,7 +584,7 @@ jobs:
 
       - name: Write step summary
         run: |
-          TOTAL=$((BUILD_PIPELINE_COUNT + RELEASE_PIPELINE_COUNT + VARIABLE_GROUP_COUNT + SERVICE_CONNECTION_COUNT + ENVIRONMENT_COUNT + DASHBOARD_COUNT + BRANCH_POLICY_COUNT + WORK_ITEM_COUNT + WIKI_COUNT + AGENT_POOL_COUNT))
+          TOTAL=$(( ${BUILD_PIPELINE_COUNT:-0} + ${RELEASE_PIPELINE_COUNT:-0} + ${VARIABLE_GROUP_COUNT:-0} + ${SERVICE_CONNECTION_COUNT:-0} + ${ENVIRONMENT_COUNT:-0} + ${DASHBOARD_COUNT:-0} + ${BRANCH_POLICY_COUNT:-0} + ${WORK_ITEM_COUNT:-0} + ${WIKI_COUNT:-0} + ${AGENT_POOL_COUNT:-0} ))
           {
             echo "## DR Config Backup — $(date -u '+%Y-%m-%d %H:%M UTC')"
             echo "**Org:** \`$ADO_ORG\` | **Project:** \`$ADO_PROJECT\` | **Total items:** $TOTAL"
