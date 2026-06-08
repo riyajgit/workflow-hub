@@ -53,11 +53,23 @@
       <div style="display:flex;gap:8px;align-items:center">
         <span id="lastSyncBadge" style="font-size:11px;background:#ddf4ff;color:#0550ae;border:1px solid #54aeff44;padding:2px 8px;border-radius:10px;display:none"></span>
         <input type="text" id="filterInput" placeholder="Filter repos&hellip;" style="width:180px;padding:4px 8px;font-size:12px" oninput="filterTable()">
+        <button class="btn btn-outline btn-sm" id="btnSyncTimes" onclick="fetchSyncTimes()" disabled>&#128260; Load sync times</button>
         <a id="ghRunsLink" href="#" target="_blank" rel="noopener" class="btn btn-outline btn-sm">&#128279; View Workflow Runs</a>
       </div>
     </div>
     <div class="card-body" style="padding:0">
       <div id="tableArea"><p class="empty" style="padding:16px"><span class="spinner"></span>&nbsp;Loading repos.json&hellip;</p></div>
+    </div>
+  </div>
+
+  <!-- Previously Mirrored (removed from repos.json but _backup repo still exists) -->
+  <div class="card" id="prevMirroredCard" style="display:none">
+    <div class="card-header">
+      <span>&#128336; Previously Mirrored Repositories</span>
+      <span style="font-size:12px;color:var(--muted)">Removed from mirror config &mdash; backup repos still exist on GitHub</span>
+    </div>
+    <div class="card-body" style="padding:0">
+      <div id="prevMirroredArea"></div>
     </div>
   </div>
 
@@ -72,19 +84,25 @@
     </div>
   </div>
 
-  <!-- PAT for workflow runs -->
+  <!-- PAT for workflow runs + sync time fetching -->
   <div class="card">
-    <div class="card-header">&#128273; GitHub Access (for workflow run links)</div>
+    <div class="card-header">&#128273; GitHub Access</div>
     <div class="card-body">
-      <div class="grid2">
+      <div class="grid2" style="margin-bottom:12px">
         <div class="field" style="margin-bottom:0">
           <label class="lbl" for="ghRepo">GitHub Repository (owner/name)</label>
           <input type="text" id="ghRepo" placeholder="riyajgit/workflow-hub" oninput="saveConfig();updateRunsLink()">
-          <p class="help">Used to build links to GitHub Actions run history.</p>
+          <p class="help">Used to build links to GitHub Actions run history and fetch sync times.</p>
         </div>
-        <div style="font-size:12px;color:var(--muted);padding-top:18px;line-height:1.7">
-          Set once on the <a href="index.html">Home</a> page and it will be remembered here automatically.
+        <div class="field" style="margin-bottom:0">
+          <label class="lbl" for="pat">GitHub PAT &mdash; <span style="font-weight:400;color:var(--muted)">needs <code>repo</code> scope (read)</span></label>
+          <input type="password" id="pat" placeholder="ghp_xxxxxxxxxxxxxxxxxxxx" autocomplete="off" oninput="onPatInput()">
+          <p class="help">Required to fetch per-repo last sync times from GitHub API. Saved in localStorage.</p>
         </div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <span id="patStatus" style="font-size:12px;color:var(--muted)">No PAT saved.</span>
+        <button class="btn btn-ghost btn-sm" onclick="clearPat()">Clear PAT</button>
       </div>
     </div>
   </div>
@@ -95,11 +113,307 @@
 'use strict';
 const $ = id => document.getElementById(id);
 
-let allRepos = [];
-let adoData  = {};
+let allRepos   = [];
+let adoData    = {};
+let syncTimes  = {};   // { "owner/repoName_backup": { pushed_at, exists } }
+let ghOwner    = '';
 
-// Format an ISO date string to a friendly local string
+function pat() { return $('pat').value.trim(); }
+
 function fmtDate(iso) {
+  if (!iso) return '—';
+  try { return new Date(iso).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }); }
+  catch (_) { return iso; }
+}
+
+function timeSince(iso) {
+  if (!iso) return '';
+  const diff = Date.now() - new Date(iso).getTime();
+  const m = Math.floor(diff / 60000);
+  if (m < 60)   return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24)   return `${h}h ago`;
+  const d = Math.floor(h / 24);
+  return `${d}d ago`;
+}
+
+function flattenAdoRepos(data) {
+  if (data.projects && typeof data.projects === 'object') {
+    return Object.entries(data.projects).flatMap(([proj, repos]) =>
+      (repos || []).map(name => ({ project: proj, name }))
+    );
+  }
+  return (data.repos || []).map(name => ({ project: data.ado_project || '—', name }));
+}
+
+window.addEventListener('DOMContentLoaded', async () => {
+  const gh = localStorage.getItem('dr_gh_repo') || '';
+  $('ghRepo').value = gh;
+  ghOwner = gh.split('/')[0] || '';
+  const savedPat = localStorage.getItem('dr_gh_pat') || '';
+  if (savedPat) $('pat').value = savedPat;
+  updatePatStatus();
+  updateRunsLink();
+  await Promise.all([loadReposJson(), loadAdoCache()]);
+  // Auto-fetch sync times if PAT is already available
+  if (pat() && ghOwner) fetchSyncTimes();
+});
+
+function saveConfig() {
+  const val = $('ghRepo').value.trim();
+  localStorage.setItem('dr_gh_repo', val);
+  ghOwner = val.split('/')[0] || '';
+  updateRunsLink();
+  $('btnSyncTimes').disabled = !(pat() && ghOwner);
+}
+
+function onPatInput() {
+  const val = $('pat').value.trim();
+  localStorage.setItem('dr_gh_pat', val);
+  updatePatStatus();
+  $('btnSyncTimes').disabled = !(val && ghOwner);
+}
+
+function clearPat() {
+  localStorage.removeItem('dr_gh_pat');
+  $('pat').value = '';
+  updatePatStatus();
+  $('btnSyncTimes').disabled = true;
+}
+
+function updatePatStatus() {
+  const el = $('patStatus');
+  if (pat()) { el.textContent = '✓ PAT saved in localStorage.'; el.style.color = 'var(--success)'; }
+  else { el.textContent = 'No PAT saved — enter one to enable sync time fetching.'; el.style.color = 'var(--muted)'; }
+  $('btnSyncTimes').disabled = !(pat() && ghOwner);
+}
+
+function updateRunsLink() {
+  const gh = $('ghRepo').value.trim();
+  const link = $('ghRunsLink');
+  if (gh) { link.href = `https://github.com/${gh}/actions/workflows/dr-mirror.yml`; link.style.opacity = '1'; }
+  else    { link.href = '#'; link.style.opacity = '.5'; }
+}
+
+// ── Fetch last push time for every _backup repo from GitHub API ───────────────
+async function fetchSyncTimes() {
+  if (!pat() || !ghOwner) return;
+  const btn = $('btnSyncTimes');
+  btn.disabled = true;
+  btn.textContent = '⏳ Fetching…';
+
+  // Collect all known repo names (enabled + all from ADO cache)
+  const knownRepos = new Set([
+    ...allRepos.map(r => r.ado_repo),
+    ...flattenAdoRepos(adoData).map(r => r.name)
+  ]);
+
+  const results = await Promise.allSettled(
+    [...knownRepos].map(async name => {
+      const backupName = `${name}_backup`;
+      const res = await fetch(
+        `https://api.github.com/repos/${ghOwner}/${backupName}`,
+        { headers: { 'Authorization': `Bearer ${pat()}`, 'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' }, cache: 'no-store' }
+      );
+      if (res.status === 200) {
+        const data = await res.json();
+        return { name, backupName, pushed_at: data.pushed_at, exists: true };
+      } else if (res.status === 404) {
+        return { name, backupName, pushed_at: null, exists: false };
+      }
+      return { name, backupName, pushed_at: null, exists: null };
+    })
+  );
+
+  results.forEach(r => {
+    if (r.status === 'fulfilled') syncTimes[r.value.name] = r.value;
+  });
+
+  btn.textContent = '↻ Refresh sync times';
+  btn.disabled = false;
+
+  renderTable(allRepos);
+  renderAdoTable();
+  renderPreviouslyMirrored();
+}
+
+// ── Previously mirrored: repos removed from repos.json but _backup still exists ─
+function renderPreviouslyMirrored() {
+  const enabledSet = new Set(allRepos.filter(r => r.enabled !== false).map(r => r.ado_repo));
+  const prev = Object.values(syncTimes).filter(s => s.exists && !enabledSet.has(s.name));
+  const card = $('prevMirroredCard');
+  if (!prev.length) { card.style.display = 'none'; return; }
+  card.style.display = '';
+
+  const rows = prev.map(s => {
+    const ago = timeSince(s.pushed_at);
+    return `<tr>
+      <td><strong>${s.name}</strong></td>
+      <td><code>${s.backupName}</code></td>
+      <td style="color:var(--muted)">${fmtDate(s.pushed_at)}<br><span style="font-size:11px">${ago}</span></td>
+      <td><span class="badge-pill badge-warning">Removed from mirror</span></td>
+      <td><a href="repos.html" style="font-size:12px;color:var(--primary)">Re-add to mirror</a></td>
+    </tr>`;
+  }).join('');
+
+  $('prevMirroredArea').innerHTML = `
+    <table class="tbl">
+      <thead><tr><th>Repo</th><th>Backup Repo</th><th>Last Synced</th><th>Status</th><th>Action</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+
+async function loadReposJson() {
+  try {
+    const res = await fetch('./repos.json', { cache: 'no-store' });
+    if (!res.ok) throw new Error(res.status);
+    allRepos = await res.json();
+    const lastMod = res.headers.get('last-modified');
+    const badge = $('lastSyncBadge');
+    if (lastMod) { badge.textContent = `🔄 Last saved: ${fmtDate(lastMod)}`; badge.style.display = 'inline'; }
+    renderStats();
+    renderTable(allRepos);
+  } catch (_) {
+    $('tableArea').innerHTML = '<div class="msg warning" style="margin:16px"><strong>repos.json not found.</strong> Go to the <a href="repos.html">Repositories</a> page.</div>';
+    renderStats();
+  }
+}
+
+async function loadAdoCache() {
+  try {
+    const res = await fetch('./ado-repos-cached.json', { cache: 'no-store' });
+    if (!res.ok) throw new Error(res.status);
+    adoData = await res.json();
+    const allFlat = flattenAdoRepos(adoData);
+    const projectCount = adoData.projects ? Object.keys(adoData.projects).length : 1;
+    $('lastCacheTime').textContent = adoData.fetched_at ? `Cache refreshed: ${fmtDate(adoData.fetched_at)}` : '';
+    $('adoCacheInfo').textContent  = adoData.fetched_at
+      ? `${allFlat.length} repos across ${projectCount} project${projectCount !== 1 ? 's' : ''} · fetched ${fmtDate(adoData.fetched_at)} by ${adoData.fetched_by || '—'}`
+      : '';
+    renderConfigMeta();
+    renderAdoTable();
+  } catch (_) {
+    $('configMeta').innerHTML   = '<div class="msg warning">ado-repos-cached.json not found.</div>';
+    $('adoTableArea').innerHTML = '<p class="empty" style="padding:16px">No ADO cache available.</p>';
+  }
+}
+
+function renderConfigMeta() {
+  const projectCount = adoData.projects ? Object.keys(adoData.projects).length : 1;
+  const allFlat      = flattenAdoRepos(adoData);
+  const projectList  = adoData.projects
+    ? Object.keys(adoData.projects).map(p =>
+        `<span style="background:#f0f3f6;padding:2px 7px;border-radius:4px;font-size:12px;margin:2px;display:inline-block">${p}</span>`
+      ).join(' ')
+    : `<code>${adoData.ado_project || '—'}</code>`;
+  $('configMeta').innerHTML = `
+    <div class="grid3" style="gap:16px">
+      <div>
+        <div style="font-size:11px;color:var(--muted);font-weight:600;margin-bottom:4px">ADO ORGANIZATION</div>
+        <code>${adoData.ado_org || '—'}</code>
+      </div>
+      <div>
+        <div style="font-size:11px;color:var(--muted);font-weight:600;margin-bottom:4px">PROJECTS (${projectCount})</div>
+        <div>${projectList}</div>
+      </div>
+      <div>
+        <div style="font-size:11px;color:var(--muted);font-weight:600;margin-bottom:4px">CACHE LAST REFRESHED</div>
+        <div style="font-size:13px">${fmtDate(adoData.fetched_at)}</div>
+        <div style="font-size:11px;color:var(--muted)">by ${adoData.fetched_by || '—'} · ${allFlat.length} total repos</div>
+      </div>
+    </div>`;
+}
+
+function renderStats() {
+  const total    = allRepos.length;
+  const enabled  = allRepos.filter(r => r.enabled !== false).length;
+  const disabled = total - enabled;
+  const projects = new Set(allRepos.map(r => r.ado_project)).size;
+  $('statsRow').innerHTML = [
+    { num: total,    label: 'Total Repos' },
+    { num: enabled,  label: 'Enabled (mirrored)' },
+    { num: disabled, label: 'Disabled' },
+    { num: projects, label: 'ADO Projects' },
+  ].map(s => `<div class="stat-card"><div class="stat-num">${s.num}</div><div class="stat-label">${s.label}</div></div>`).join('');
+}
+
+function syncBadge(repoName) {
+  const s = syncTimes[repoName];
+  if (!s) return '<span style="color:var(--muted);font-size:12px">—</span>';
+  if (!s.exists) return '<span style="font-size:12px;color:var(--muted)">No backup repo yet</span>';
+  const ago = timeSince(s.pushed_at);
+  const color = s.pushed_at && (Date.now() - new Date(s.pushed_at)) > 2 * 24 * 3600000 ? 'var(--warning-text)' : 'var(--success)';
+  return `<span style="font-size:12px;color:${color}">${fmtDate(s.pushed_at)}</span><br><span style="font-size:11px;color:var(--muted)">${ago}</span>`;
+}
+
+function renderTable(repos) {
+  if (!repos.length) {
+    $('tableArea').innerHTML = '<p class="empty" style="padding:16px">No repos configured. Go to <a href="repos.html">Repositories</a> to add some.</p>';
+    return;
+  }
+  const hasSyncData = Object.keys(syncTimes).length > 0;
+  const rows = repos.map(r => {
+    const enabled     = r.enabled !== false;
+    const statusBadge = enabled
+      ? '<span class="badge-pill badge-success">✓ Enabled</span>'
+      : '<span class="badge-pill badge-muted">Disabled</span>';
+    const backupRepo  = `${r.ado_repo}_backup`;
+    const mirrorLink  = ghOwner
+      ? `<a href="https://github.com/${ghOwner}/${backupRepo}" target="_blank" rel="noopener" style="font-size:12px;color:var(--primary)">↗ ${backupRepo}</a>`
+      : `<span style="color:var(--muted);font-size:12px">${backupRepo}</span>`;
+    const syncCell = hasSyncData ? `<td>${syncBadge(r.ado_repo)}</td>` : '';
+    return `<tr>
+      <td><strong>${r.ado_repo}</strong></td>
+      <td><code>${r.ado_org || '—'}</code></td>
+      <td><code>${r.ado_project || '—'}</code></td>
+      <td>${statusBadge}</td>
+      ${syncCell}
+      <td>${mirrorLink}</td>
+    </tr>`;
+  }).join('');
+  const syncHeader = hasSyncData ? '<th>Last Synced</th>' : '';
+  $('tableArea').innerHTML = `
+    <table class="tbl">
+      <thead><tr><th>Repository</th><th>ADO Org</th><th>ADO Project</th><th>Status</th>${syncHeader}<th>GitHub Mirror</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+
+function renderAdoTable() {
+  const allFlat = flattenAdoRepos(adoData);
+  if (!allFlat.length) { $('adoTableArea').innerHTML = '<p class="empty" style="padding:16px">No discovered repos.</p>'; return; }
+  const mirroredSet = new Set(allRepos.filter(r => r.enabled !== false).map(r => `${r.ado_project}::${r.ado_repo}`));
+  const byProject = {};
+  allFlat.forEach(({ project, name }) => { if (!byProject[project]) byProject[project] = []; byProject[project].push(name); });
+  const hasSyncData = Object.keys(syncTimes).length > 0;
+  const rows = Object.entries(byProject).flatMap(([project, names]) => [
+    `<tr style="background:#f6f8fa"><td colspan="${hasSyncData ? 4 : 3}" style="font-weight:600;font-size:12px;padding:6px 12px">📁 ${project} <span style="font-weight:400;color:var(--muted)">(${names.length} repos)</span></td></tr>`,
+    ...names.map(name => {
+      const key      = `${project}::${name}`;
+      const mirrored = mirroredSet.has(key);
+      const badge    = mirrored ? '<span class="badge-pill badge-success">Mirrored</span>' : '<span class="badge-pill badge-muted">Not selected</span>';
+      const action   = mirrored ? '' : `<a href="repos.html" style="font-size:12px;color:var(--primary)">+ Add</a>`;
+      const syncCell = hasSyncData ? `<td>${syncBadge(name)}</td>` : '';
+      return `<tr><td style="padding-left:24px"><strong>${name}</strong></td><td>${badge}</td>${syncCell}<td>${action}</td></tr>`;
+    })
+  ]).join('');
+  const syncHeader = hasSyncData ? '<th>Last Synced</th>' : '';
+  $('adoTableArea').innerHTML = `
+    <table class="tbl">
+      <thead><tr><th>ADO Repository</th><th>Mirror Status</th>${syncHeader}<th>Action</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+
+function filterTable() {
+  const q = $('filterInput').value.toLowerCase();
+  renderTable(allRepos.filter(r =>
+    r.ado_repo.toLowerCase().includes(q) ||
+    (r.ado_org || '').toLowerCase().includes(q) ||
+    (r.ado_project || '').toLowerCase().includes(q)
+  ));
+}
+</script>
   if (!iso) return '—';
   try { return new Date(iso).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }); }
   catch (_) { return iso; }
