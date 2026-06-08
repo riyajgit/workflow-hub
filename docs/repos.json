@@ -1,6 +1,18 @@
 [
   {
     "ado_org": "binhsps",
+    "ado_project": "Cloud Platform",
+    "ado_repo": "Automation_Test_Dev",
+    "enabled": true
+  },
+  {
+    "ado_org": "binhsps",
+    "ado_project": "Cloud Platform",
+    "ado_repo": "Powershell_Scripts",
+    "enabled": true
+  },
+  {
+    "ado_org": "binhsps",
     "ado_project": "Test1",
     "ado_repo": "pipelinetest",
     "enabled": true

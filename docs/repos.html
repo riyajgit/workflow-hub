@@ -153,7 +153,7 @@ function saveAdoConfig() {
 
 async function loadAdoCache() {
   try {
-    const res  = await fetch('./ado-repos-cached.json');
+    const res  = await fetch('./ado-repos-cached.json', { cache: 'no-store' });
     if (!res.ok) throw new Error(res.status);
     const data = await res.json();
     S.adoOrg   = data.ado_org || '';
@@ -187,7 +187,7 @@ async function loadAdoCache() {
 
 async function loadCurrentSelection() {
   try {
-    const res = await fetch('./repos.json');
+    const res = await fetch('./repos.json', { cache: 'no-store' });
     if (!res.ok) return;
     const current = await res.json();
     current.filter(r => r.enabled !== false)
@@ -368,34 +368,32 @@ async function _doSave() {
   }).sort((a, b) => a.ado_project.localeCompare(b.ado_project) || a.ado_repo.localeCompare(b.ado_repo));
 
   const encoded = btoa(unescape(encodeURIComponent(JSON.stringify(repoList, null, 2))));
-  showMsg('<span class="spinner"></span>&nbsp;Saving selection to repos.json&hellip;');
-  try {
-    // Fetch current SHA so GitHub accepts the PUT as an update
+  // Helper: write a single file via Contents API (fetches SHA first, then PUTs)
+  async function writeFile(path, content, message) {
     let sha = null;
-    const getRes = await fetch(`https://api.github.com/repos/${ghRepo()}/contents/repos.json`, { headers: apiHeaders() });
+    const getRes = await fetch(`https://api.github.com/repos/${ghRepo()}/contents/${path}`, { headers: apiHeaders(), cache: 'no-store' });
     if (getRes.ok) { const d = await getRes.json(); sha = d.sha; }
-
-    const body = {
-      message: `chore(dr): update repo selection \u2014 ${S.selected.size} repos enabled`,
-      content: encoded,
-      branch: 'main'
-    };
+    const body = { message, content, branch: 'main' };
     if (sha) body.sha = sha;
-
-    const putRes = await fetch(`https://api.github.com/repos/${ghRepo()}/contents/repos.json`, {
-      method: 'PUT',
-      headers: { ...apiHeaders(), 'Content-Type': 'application/json' },
+    const putRes = await fetch(`https://api.github.com/repos/${ghRepo()}/contents/${path}`, {
+      method: 'PUT', headers: { ...apiHeaders(), 'Content-Type': 'application/json' },
       body: JSON.stringify(body)
     });
-    if (putRes.ok) {
-      const summary = [...S.selected].reduce((acc, key) => {
-        const [proj] = fromKey(key); acc[proj] = (acc[proj] || 0) + 1; return acc;
-      }, {});
-      const summaryText = Object.entries(summary).map(([p, n]) => `${p}: ${n}`).join(' \u00b7 ');
-      showMsg(`repos.json saved &#10003; \u2014 <strong>${S.selected.size} repos</strong> enabled for daily mirror.<br><small>${summaryText}</small>`, 'success');
-    } else {
-      throw new Error(`HTTP ${putRes.status}: ${await putRes.text()}`);
-    }
+    if (!putRes.ok) throw new Error(`${path} → HTTP ${putRes.status}: ${await putRes.text()}`);
+  }
+  showMsg('<span class="spinner"></span>&nbsp;Saving selection to repos.json&hellip;');
+  try {
+    const commitMsg = `chore(dr): update repo selection \u2014 ${S.selected.size} repos enabled`;
+    // Write both root repos.json (used by workflows) and docs/repos.json (read by portal)
+    await Promise.all([
+      writeFile('repos.json',      encoded, commitMsg),
+      writeFile('docs/repos.json', encoded, commitMsg),
+    ]);
+    const summary = [...S.selected].reduce((acc, key) => {
+      const [proj] = fromKey(key); acc[proj] = (acc[proj] || 0) + 1; return acc;
+    }, {});
+    const summaryText = Object.entries(summary).map(([p, n]) => `${p}: ${n}`).join(' \u00b7 ');
+    showMsg(`repos.json saved &#10003; \u2014 <strong>${S.selected.size} repos</strong> enabled for daily mirror.<br><small>${summaryText}</small>`, 'success');
   } catch (e) { showMsg(`Save failed: ${e.message}`, 'error'); }
 }
 </script>

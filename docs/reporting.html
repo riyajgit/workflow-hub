@@ -51,6 +51,7 @@
     <div class="card-header">
       <span>Mirrored Repositories (repos.json)</span>
       <div style="display:flex;gap:8px;align-items:center">
+        <span id="lastSyncBadge" style="font-size:11px;background:#ddf4ff;color:#0550ae;border:1px solid #54aeff44;padding:2px 8px;border-radius:10px;display:none"></span>
         <input type="text" id="filterInput" placeholder="Filter repos&hellip;" style="width:180px;padding:4px 8px;font-size:12px" oninput="filterTable()">
         <a id="ghRunsLink" href="#" target="_blank" rel="noopener" class="btn btn-outline btn-sm">&#128279; View Workflow Runs</a>
       </div>
@@ -97,6 +98,24 @@ const $ = id => document.getElementById(id);
 let allRepos = [];
 let adoData  = {};
 
+// Format an ISO date string to a friendly local string
+function fmtDate(iso) {
+  if (!iso) return '—';
+  try { return new Date(iso).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }); }
+  catch (_) { return iso; }
+}
+
+// Flatten multi-project cache to a flat repo array: [{project, name}, ...]
+function flattenAdoRepos(data) {
+  if (data.projects && typeof data.projects === 'object') {
+    return Object.entries(data.projects).flatMap(([proj, repos]) =>
+      (repos || []).map(name => ({ project: proj, name }))
+    );
+  }
+  // Legacy single-project format
+  return (data.repos || []).map(name => ({ project: data.ado_project || '—', name }));
+}
+
 window.addEventListener('DOMContentLoaded', async () => {
   const gh = localStorage.getItem('dr_gh_repo') || '';
   $('ghRepo').value = gh;
@@ -119,9 +138,22 @@ function updateRunsLink() {
 
 async function loadReposJson() {
   try {
-    const res = await fetch('./repos.json');
+    // cache:no-store ensures we always get the latest committed file, not a stale browser cache
+    const res = await fetch('./repos.json', { cache: 'no-store' });
     if (!res.ok) throw new Error(res.status);
     allRepos = await res.json();
+
+    // Show last-modified from the response header as "last sync" time
+    const lastMod = res.headers.get('last-modified');
+    const badge = $('lastSyncBadge');
+    if (lastMod) {
+      badge.textContent = `\uD83D\uDD04 Last synced: ${fmtDate(lastMod)}`;
+      badge.style.display = 'inline';
+    } else if (allRepos.length) {
+      badge.textContent = `\uD83D\uDD04 ${allRepos.length} repos loaded`;
+      badge.style.display = 'inline';
+    }
+
     renderStats();
     renderTable(allRepos);
   } catch (_) {
@@ -132,13 +164,20 @@ async function loadReposJson() {
 
 async function loadAdoCache() {
   try {
-    const res = await fetch('./ado-repos-cached.json');
+    const res = await fetch('./ado-repos-cached.json', { cache: 'no-store' });
     if (!res.ok) throw new Error(res.status);
     adoData = await res.json();
-    $('lastCacheTime').textContent = adoData.fetched_at ? `Cache: ${adoData.fetched_at}` : '';
-    $('adoCacheInfo').textContent  = adoData.fetched_at
-      ? `${adoData.repos ? adoData.repos.length : 0} repos | Last fetched ${adoData.fetched_at} by ${adoData.fetched_by || '—'}`
+
+    const allFlat = flattenAdoRepos(adoData);
+    const projectCount = adoData.projects ? Object.keys(adoData.projects).length : 1;
+
+    $('lastCacheTime').textContent = adoData.fetched_at
+      ? `Cache refreshed: ${fmtDate(adoData.fetched_at)}`
       : '';
+    $('adoCacheInfo').textContent = adoData.fetched_at
+      ? `${allFlat.length} repos across ${projectCount} project${projectCount !== 1 ? 's' : ''} \u00b7 fetched ${fmtDate(adoData.fetched_at)} by ${adoData.fetched_by || '\u2014'}`
+      : '';
+
     renderConfigMeta();
     renderAdoTable();
   } catch (_) {
@@ -148,35 +187,42 @@ async function loadAdoCache() {
 }
 
 function renderConfigMeta() {
+  const projectCount = adoData.projects ? Object.keys(adoData.projects).length : 1;
+  const allFlat      = flattenAdoRepos(adoData);
+  const projectList  = adoData.projects
+    ? Object.keys(adoData.projects).map(p =>
+        `<span style="background:#f0f3f6;padding:2px 7px;border-radius:4px;font-size:12px;margin:2px;display:inline-block">${p}</span>`
+      ).join(' ')
+    : `<code>${adoData.ado_project || '\u2014'}</code>`;
+
   $('configMeta').innerHTML = `
     <div class="grid3" style="gap:16px">
       <div>
-        <div style="font-size:11px;color:var(--muted);font-weight:600;margin-bottom:2px">ADO ORGANIZATION</div>
-        <code>${adoData.ado_org || '—'}</code>
+        <div style="font-size:11px;color:var(--muted);font-weight:600;margin-bottom:4px">ADO ORGANIZATION</div>
+        <code>${adoData.ado_org || '\u2014'}</code>
       </div>
       <div>
-        <div style="font-size:11px;color:var(--muted);font-weight:600;margin-bottom:2px">ADO PROJECT</div>
-        <code>${adoData.ado_project || '—'}</code>
+        <div style="font-size:11px;color:var(--muted);font-weight:600;margin-bottom:4px">PROJECTS (${projectCount})</div>
+        <div>${projectList}</div>
       </div>
       <div>
-        <div style="font-size:11px;color:var(--muted);font-weight:600;margin-bottom:2px">LAST REFRESHED BY</div>
-        <code>${adoData.fetched_by || '—'}</code>
+        <div style="font-size:11px;color:var(--muted);font-weight:600;margin-bottom:4px">CACHE LAST REFRESHED</div>
+        <div style="font-size:13px">${fmtDate(adoData.fetched_at)}</div>
+        <div style="font-size:11px;color:var(--muted)">by ${adoData.fetched_by || '\u2014'} \u00b7 ${allFlat.length} total repos</div>
       </div>
     </div>`;
 }
 
 function renderStats() {
-  const total   = allRepos.length;
-  const enabled = allRepos.filter(r => r.enabled !== false).length;
+  const total    = allRepos.length;
+  const enabled  = allRepos.filter(r => r.enabled !== false).length;
   const disabled = total - enabled;
-  const orgs    = new Set(allRepos.map(r => r.ado_org)).size;
-  const projs   = new Set(allRepos.map(r => r.ado_project)).size;
+  const projects = new Set(allRepos.map(r => r.ado_project)).size;
   $('statsRow').innerHTML = [
     { num: total,    label: 'Total Repos' },
     { num: enabled,  label: 'Enabled (mirrored)' },
     { num: disabled, label: 'Disabled' },
-    { num: orgs,     label: 'ADO Orgs' },
-    { num: projs,    label: 'ADO Projects' },
+    { num: projects, label: 'ADO Projects' },
   ].map(s => `
     <div class="stat-card">
       <div class="stat-num">${s.num}</div>
@@ -190,18 +236,19 @@ function renderTable(repos) {
     return;
   }
   const rows = repos.map(r => {
-    const enabled   = r.enabled !== false;
+    const enabled     = r.enabled !== false;
     const statusBadge = enabled
       ? '<span class="badge-pill badge-success">&#10003; Enabled</span>'
       : '<span class="badge-pill badge-muted">Disabled</span>';
     const gh = localStorage.getItem('dr_gh_repo') || '';
-    const mirrorLink = gh
-      ? `<a href="https://github.com/${gh}/${r.ado_repo}" target="_blank" rel="noopener" style="font-size:12px;color:var(--primary)">&#128279; GitHub mirror</a>`
-      : '<span style="color:var(--muted);font-size:12px">—</span>';
+    const backupRepo  = `${r.ado_repo}_backup`;
+    const mirrorLink  = gh
+      ? `<a href="https://github.com/${gh.split('/')[0]}/${backupRepo}" target="_blank" rel="noopener" style="font-size:12px;color:var(--primary)">&#128279; ${backupRepo}</a>`
+      : '<span style="color:var(--muted);font-size:12px">\u2014</span>';
     return `<tr>
       <td><strong>${r.ado_repo}</strong></td>
-      <td><code>${r.ado_org}</code></td>
-      <td><code>${r.ado_project}</code></td>
+      <td><code>${r.ado_org || '\u2014'}</code></td>
+      <td><code>${r.ado_project || '\u2014'}</code></td>
       <td>${statusBadge}</td>
       <td>${mirrorLink}</td>
     </tr>`;
@@ -209,29 +256,50 @@ function renderTable(repos) {
   $('tableArea').innerHTML = `
     <table class="tbl">
       <thead><tr>
-        <th>Repository</th><th>ADO Org</th><th>ADO Project</th><th>Status</th><th>Mirror Link</th>
+        <th>Repository</th><th>ADO Org</th><th>ADO Project</th><th>Status</th><th>GitHub Mirror</th>
       </tr></thead>
       <tbody>${rows}</tbody>
     </table>`;
 }
 
 function renderAdoTable() {
-  const repos = adoData.repos || [];
-  if (!repos.length) {
+  const allFlat = flattenAdoRepos(adoData);
+  if (!allFlat.length) {
     $('adoTableArea').innerHTML = '<p class="empty" style="padding:16px">No discovered repos.</p>';
     return;
   }
-  const mirroredSet = new Set(allRepos.filter(r => r.enabled !== false).map(r => r.ado_repo));
-  const rows = repos.map(name => {
-    const mirrored = mirroredSet.has(name);
-    const badge = mirrored
-      ? '<span class="badge-pill badge-success">Mirrored</span>'
-      : '<span class="badge-pill badge-muted">Not selected</span>';
-    const action = mirrored
-      ? ''
-      : `<a href="repos.html" style="font-size:12px;color:var(--primary)">+ Add to mirror</a>`;
-    return `<tr><td><strong>${name}</strong></td><td>${badge}</td><td>${action}</td></tr>`;
-  }).join('');
+  const mirroredSet = new Set(
+    allRepos.filter(r => r.enabled !== false).map(r => `${r.ado_project}::${r.ado_repo}`)
+  );
+
+  // Group by project for display
+  const byProject = {};
+  allFlat.forEach(({ project, name }) => {
+    if (!byProject[project]) byProject[project] = [];
+    byProject[project].push(name);
+  });
+
+  const rows = Object.entries(byProject).flatMap(([project, names]) => [
+    `<tr style="background:#f6f8fa">
+       <td colspan="3" style="font-weight:600;font-size:12px;padding:6px 12px">
+         &#128193; ${project} <span style="font-weight:400;color:var(--muted)">(${names.length} repos)</span>
+       </td>
+     </tr>`,
+    ...names.map(name => {
+      const key      = `${project}::${name}`;
+      const mirrored = mirroredSet.has(key);
+      const badge    = mirrored
+        ? '<span class="badge-pill badge-success">Mirrored</span>'
+        : '<span class="badge-pill badge-muted">Not selected</span>';
+      const action   = mirrored ? '' : `<a href="repos.html" style="font-size:12px;color:var(--primary)">+ Add to mirror</a>`;
+      return `<tr>
+        <td style="padding-left:24px"><strong>${name}</strong></td>
+        <td>${badge}</td>
+        <td>${action}</td>
+      </tr>`;
+    })
+  ]).join('');
+
   $('adoTableArea').innerHTML = `
     <table class="tbl">
       <thead><tr><th>ADO Repository</th><th>Mirror Status</th><th>Action</th></tr></thead>
@@ -243,7 +311,7 @@ function filterTable() {
   const q = $('filterInput').value.toLowerCase();
   const filtered = allRepos.filter(r =>
     r.ado_repo.toLowerCase().includes(q) ||
-    (r.ado_org  || '').toLowerCase().includes(q) ||
+    (r.ado_org     || '').toLowerCase().includes(q) ||
     (r.ado_project || '').toLowerCase().includes(q)
   );
   renderTable(filtered);
