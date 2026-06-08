@@ -1,18 +1,10 @@
 [
   {
-    "github_owner": "your-github-org",
-    "github_repo": "your-repo-name",
+    "github_owner": "riyajgit",
+    "github_repo": "gitrepotocopy",
     "ado_org": "binhsps",
     "ado_project": "Test1",
     "ado_repo": "your-repo-name",
     "enabled": true
-  },
-  {
-    "github_owner": "your-github-org",
-    "github_repo": "another-repo",
-    "ado_org": "binhsps",
-    "ado_project": "Test1",
-    "ado_repo": "another-repo",
-    "enabled": false
   }
 ]
