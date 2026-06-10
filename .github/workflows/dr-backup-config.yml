@@ -491,9 +491,12 @@ jobs:
             && echo "   Created GitHub repo." \
             || echo "   Repo already exists — syncing."
 
-            # Clone wiki as a bare mirror from ADO
+            # Clone wiki as a bare mirror from ADO.
+            # Use -c credential.helper='' to prevent the GitHub Actions runner's
+            # git credential helper (set via GH_TOKEN) from intercepting ADO HTTPS
+            # requests and replacing the embedded ADO_PAT with GitHub credentials.
             CLONE_DIR="wiki-clone-$(echo "$WIKI_NAME" | tr '/' '-' | tr ' ' '_')"
-            if git clone --mirror "$ADO_CLONE_URL" "$CLONE_DIR" 2>&1; then
+            if git -c credential.helper='' clone --mirror "$ADO_CLONE_URL" "$CLONE_DIR" 2>&1; then
               # Push all branches and tags to GitHub backup
               git -C "$CLONE_DIR" push --force \
                 "https://x-access-token:$GH_PAT@github.com/$GH_OWNER/${BACKUP_REPO}.git" \
