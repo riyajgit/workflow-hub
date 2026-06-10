@@ -1,0 +1,20 @@
+{
+  "ado_org": "binhsps",
+  "ado_project": "Cloud Platform",
+  "backed_up_at": "2026-06-10T17:10:04Z",
+  "backed_up_by": "riyajgit",
+  "github_repo": "riyajgit/workflow-hub",
+  "run_url": "https://github.com/riyajgit/workflow-hub/actions/runs/27292755033",
+  "components": {
+    "build_pipelines": 0,
+    "release_pipelines": 0,
+    "variable_groups": 0,
+    "service_connections": 0,
+    "environments": 0,
+    "dashboards": 0,
+    "branch_policies": 0,
+    "work_items": 0,
+    "wiki_repos": 1,
+    "agent_pools": 0
+  }
+}
