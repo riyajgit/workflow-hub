@@ -89,13 +89,7 @@ jobs:
           # ── Determine projects list ───────────────────────────────────────
           if [ -n "$INPUT_PROJECTS" ]; then
             # Parse comma-separated input; strip surrounding quotes and whitespace
-            PROJECTS_JSON=$(python3 -c "
-import sys, json
-raw = sys.argv[1]
-items = [p.strip().strip('\"').strip(\"'\") for p in raw.split(',')]
-items = [p for p in items if p]
-print(json.dumps(items))
-" "$INPUT_PROJECTS")
+            PROJECTS_JSON=$(printf '%s' "$INPUT_PROJECTS" | python3 -c "import sys,json; items=[p.strip().strip(chr(34)).strip(chr(39)) for p in sys.stdin.read().split(',') if p.strip()]; print(json.dumps(items))")
             echo "Projects source: workflow_dispatch input."
           elif [ -f "docs/backup-projects.json" ]; then
             PROJECTS_JSON=$(jq -c '.projects' docs/backup-projects.json)
