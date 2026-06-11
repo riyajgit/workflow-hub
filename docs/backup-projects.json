@@ -1,6 +1,9 @@
 {
   "ado_org": "binhsps",
-  "projects": ["Test1", "Cloud Platform"],
-  "updated_at": "2026-06-11T00:00:00Z",
+  "projects": [
+    "Cloud Platform",
+    "Test1"
+  ],
+  "updated_at": "2026-06-11T10:27:54.942Z",
   "updated_by": "portal"
 }
