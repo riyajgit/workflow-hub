@@ -98,10 +98,10 @@ print(json.dumps(items))
 " "$INPUT_PROJECTS")
             echo "Projects source: workflow_dispatch input."
           elif [ -f "docs/backup-projects.json" ]; then
-            PROJECTS_JSON=$(jq '.projects' docs/backup-projects.json)
+            PROJECTS_JSON=$(jq -c '.projects' docs/backup-projects.json)
             echo "Projects source: docs/backup-projects.json"
           elif [ -f "repos.json" ]; then
-            PROJECTS_JSON=$(jq '[.[].ado_project] | unique' repos.json)
+            PROJECTS_JSON=$(jq -c '[.[].ado_project] | unique' repos.json)
             echo "Projects source: repos.json (all unique projects)."
           else
             echo "ERROR: Cannot determine projects to back up."
@@ -122,9 +122,13 @@ print(json.dumps(items))
 
           echo "Target org    : $ADO_ORG  (encoded: $ADO_ORG_ENC)"
           echo "Projects ($PROJECT_COUNT): $(echo "$PROJECTS_JSON" | jq -r '.[]' | tr '\n' ',' | sed 's/,$//')"
-          echo "ADO_ORG=$ADO_ORG"            >> "$GITHUB_ENV"
-          echo "ADO_ORG_ENC=$ADO_ORG_ENC"    >> "$GITHUB_ENV"
-          echo "PROJECTS_JSON=$PROJECTS_JSON" >> "$GITHUB_ENV"
+          echo "ADO_ORG=$ADO_ORG"         >> "$GITHUB_ENV"
+          echo "ADO_ORG_ENC=$ADO_ORG_ENC" >> "$GITHUB_ENV"
+          {
+            echo "PROJECTS_JSON<<ENVEOF"
+            echo "$PROJECTS_JSON"
+            echo "ENVEOF"
+          } >> "$GITHUB_ENV"
 
       - name: Backup all projects
         # Per-project loop: checks org reachability once, then for each project:
