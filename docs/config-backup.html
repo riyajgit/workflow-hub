@@ -6,6 +6,20 @@
   <title>DR WorkflowHub — Config Backup</title>
   <link rel="stylesheet" href="shared.css">
   <script src="shared.js" defer></script>
+  <style>
+    .project-backup-card { border:1px solid var(--border); border-radius:8px; margin-bottom:16px; overflow:hidden; }
+    .project-backup-header { display:flex; align-items:center; gap:10px; padding:12px 16px; background:var(--surface); border-bottom:1px solid var(--border); }
+    .project-backup-name { font-weight:600; font-size:15px; flex:1; }
+    .project-backup-time { font-size:12px; color:var(--muted); }
+    .project-select-row { display:flex; align-items:center; gap:10px; padding:10px 0; border-bottom:1px solid var(--border); }
+    .project-select-row:last-child { border-bottom:none; }
+    .project-select-check { width:18px; height:18px; cursor:pointer; accent-color:var(--primary); }
+    .project-select-name { flex:1; font-size:14px; font-weight:500; }
+    .project-select-status { font-size:12px; }
+    .badge-backed { background:#d1fae5; color:#065f46; padding:2px 8px; border-radius:10px; font-size:11px; font-weight:600; }
+    .badge-not-backed { background:#fef3c7; color:#92400e; padding:2px 8px; border-radius:10px; font-size:11px; }
+    .actions-bar { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:12px; }
+  </style>
 </head>
 <body>
 
@@ -29,7 +43,7 @@
 <main>
   <div>
     <div class="page-title">&#128190; Config Backup</div>
-    <div class="page-subtitle">Backup and view non-repository ADO components: pipelines, variable groups, service connections, environments, dashboards, wikis.</div>
+    <div class="page-subtitle">Manage which ADO projects are included in daily config backups. View backup status per project &mdash; last backup date, wiki repos discovered, and component counts.</div>
   </div>
 
   <div id="globalMsg"></div>
@@ -48,7 +62,7 @@
             <li>&#128279; Service connections <em style="font-size:11px">(credentials excluded by ADO)</em></li>
             <li>&#127759; Environments</li>
             <li>&#128202; Dashboards</li>
-            <li>&#128214; Wiki repos (names + clone URLs)</li>
+            <li>&#128214; Wiki repos (names + content mirrored to GitHub)</li>
             <li>&#129520; Agent pools (org-level)</li>
           </ul>
         </div>
@@ -56,268 +70,357 @@
           <div style="font-weight:600;margin-bottom:8px">&#9888; Not included / separate handling</div>
           <ul style="list-style:none;padding:0;line-height:2;color:var(--muted)">
             <li>&#128275; Secret variable values (ADO never exposes these via API)</li>
-            <li>&#128275; Service connection credentials (same — by design)</li>
+            <li>&#128275; Service connection credentials (same &mdash; by design)</li>
             <li>&#128203; Work items / boards (use ADO Migration Tools for these)</li>
             <li>&#129513; Test plans &amp; cases (export manually or via migration tools)</li>
             <li>&#128230; Artifact packages (handled separately per feed)</li>
           </ul>
-          <div style="margin-top:10px;font-size:12px;color:var(--muted)">
-            <strong style="color:var(--text)">Wiki repos?</strong> They are Git repos &mdash; add them to the
-            <a href="repos.html">Repositories</a> mirror for full content backup.
-          </div>
         </div>
       </div>
     </div>
   </div>
 
-  <!-- ADO Connection + Trigger -->
+  <!-- Settings -->
   <div class="card">
     <div class="card-header">
-      <span>&#9729; ADO Connection &amp; Trigger</span>
-      <span id="connStatus" style="font-size:12px;color:var(--muted)"></span>
+      <span>&#9881; Settings</span>
+      <button class="btn btn-outline btn-sm" onclick="toggleSettings()">&#9881; Toggle</button>
     </div>
-    <div class="card-body">
-      <div class="grid3">
-        <div class="field" style="margin-bottom:0">
-          <label class="lbl" for="adoOrg">ADO Organization</label>
-          <input type="text" id="adoOrg" placeholder="e.g. binhsps" oninput="saveAdoConfig();scheduleReload()">
-          <p class="help">Your Azure DevOps org name.</p>
-        </div>
-        <div class="field" style="margin-bottom:0">
-          <label class="lbl" for="adoProject">ADO Project</label>
-          <input type="text" id="adoProject" placeholder="e.g. Test1" oninput="saveAdoConfig();scheduleReload()">
-          <p class="help">Project to back up configuration from.</p>
-        </div>
-        <div class="field" style="margin-bottom:0">
-          <label class="lbl" for="ghRepo">GitHub Repository (owner/name)</label>
-          <input type="text" id="ghRepo" placeholder="riyajgit/workflow-hub" oninput="saveConfig()">
-          <p class="help">Workflow-hub hosting <code>dr-backup-config.yml</code>.</p>
-        </div>
-      </div>
-      <div class="pat-drawer hidden" id="patDrawer">
-        <div class="pat-row" style="margin-top:14px">
-          <div class="field">
-            <label class="lbl" for="pat">&#128273; GitHub PAT &mdash; <span style="font-weight:400;color:var(--muted)">needs <code>repo</code> + <code>workflow</code> scopes</span></label>
+    <div id="settingsDrawer" class="hidden">
+      <div class="card-body">
+        <div class="grid3">
+          <div class="field" style="margin-bottom:0">
+            <label class="lbl" for="ghRepo">GitHub Repository (owner/name)</label>
+            <input type="text" id="ghRepo" placeholder="riyajgit/workflow-hub" oninput="saveConfig()">
+            <p class="help">Workflow-hub hosting <code>dr-backup-config.yml</code>.</p>
+          </div>
+          <div class="field" style="margin-bottom:0">
+            <label class="lbl" for="ghOwner">GitHub Owner</label>
+            <input type="text" id="ghOwner" placeholder="riyajgit" oninput="saveConfig()">
+            <p class="help">Owner of <code>*_backup</code> repos (for wiki backup links).</p>
+          </div>
+          <div class="field" style="margin-bottom:0">
+            <label class="lbl" for="pat">&#128273; GitHub PAT <span style="font-weight:400;color:var(--muted)">&#8212; <code>repo</code> + <code>workflow</code> scopes</span></label>
             <input type="password" id="pat" placeholder="ghp_xxxxxxxxxxxxxxxxxxxx" autocomplete="off" oninput="onPatInput()">
+            <p class="pat-status none" id="patStatus" style="font-size:12px;margin-top:4px"></p>
           </div>
-          <button class="btn btn-outline btn-sm" style="margin-top:16px" onclick="clearPat()">Sign out</button>
         </div>
-        <p class="pat-status none" id="patStatus" style="font-size:12px;margin-top:4px"></p>
-      </div>
-      <div class="actions">
-        <button class="btn btn-primary" id="btnRunBackup" onclick="triggerBackup()">&#128190; Run Backup Now</button>
-        <button class="btn btn-outline btn-sm" onclick="togglePat()">&#128273; PAT settings</button>
+        <div style="margin-top:10px;display:flex;gap:8px">
+          <button class="btn btn-outline btn-sm" onclick="clearPat()">Sign out</button>
+          <a id="ghRunsLink" href="#" target="_blank" rel="noopener" class="btn btn-outline btn-sm">&#128279; Workflow Runs</a>
+        </div>
       </div>
     </div>
   </div>
 
-  <!-- Last Backup Summary -->
+  <!-- Project Selection -->
   <div class="card">
     <div class="card-header">
-      <span>Last Backup Summary</span>
+      <span>&#128196; Projects in Backup Config</span>
       <div style="display:flex;gap:8px;align-items:center">
-        <span id="lastBackupTime" style="font-size:12px;color:var(--muted)"></span>
-        <button class="btn btn-outline btn-sm" onclick="loadManifest()">&#8635; Refresh</button>
-        <a id="ghRunsLink" href="#" target="_blank" rel="noopener" class="btn btn-outline btn-sm">&#128279; Workflow Runs</a>
+        <span id="selectionStatus" style="font-size:12px;color:var(--muted)"></span>
+        <button class="btn btn-outline btn-sm" onclick="loadPage()">&#8635; Refresh</button>
       </div>
-    </div>
-    <div class="card-body">
-      <div id="statsRow" class="stat-grid" style="margin-bottom:16px"></div>
-      <div id="componentTable"></div>
-    </div>
-  </div>
-
-  <!-- Wiki Repos -->
-  <div class="card" id="wikiCard" style="display:none">
-    <div class="card-header">
-      <span>&#128214; Wiki Repos Discovered</span>
-      <span style="font-size:12px;color:var(--muted)">Wiki repos are Git repos &mdash; mirror them for full backup</span>
     </div>
     <div class="card-body" style="padding:0">
-      <div id="wikiTable"></div>
+      <div id="projectSelection" style="padding:16px">
+        <p class="empty"><span class="spinner"></span>&nbsp;Loading projects&hellip;</p>
+      </div>
+      <div class="actions-bar" style="padding:0 16px 16px">
+        <button class="btn btn-primary" onclick="saveBackupConfig()">&#128190; Save Selection</button>
+        <button class="btn btn-success" onclick="runAllBackup()">&#9654; Run Backup for Selected</button>
+        <span style="font-size:12px;color:var(--muted)">Save writes <code>docs/backup-projects.json</code> which controls the daily scheduled backup.</span>
+      </div>
     </div>
   </div>
 
-  <!-- Raw file links -->
-  <div class="card" id="rawFilesCard" style="display:none">
-    <div class="card-header">&#128196; Raw Backup Files (GitHub)</div>
-    <div class="card-body">
-      <p class="section-intro">Full JSON exports are stored in the GitHub repository (not web-exposed). View or download them directly on GitHub.</p>
-      <div id="rawFileLinks" class="tags"></div>
-    </div>
-  </div>
+  <!-- Per-project backup status cards -->
+  <div id="projectCards"></div>
 
 </main>
 
 <script>
 'use strict';
 const $ = id => document.getElementById(id);
-const ghRepo = () => $('ghRepo').value.trim();
-const pat    = () => $('pat').value.trim();
-let _reloadTimer = null;
-let _manifest = null;
+const ghRepo  = () => $('ghRepo').value.trim();
+const ghOwner = () => $('ghOwner').value.trim() || ghRepo().split('/')[0] || '';
+const pat     = () => $('pat').value.trim();
 
-function showMsg(html, type = 'info') { $('globalMsg').innerHTML = `<div class="msg ${type}">${html}</div>`; }
-function clearMsg() { $('globalMsg').innerHTML = ''; }
 function apiHeaders() {
   return { 'Authorization': `Bearer ${pat()}`, 'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' };
 }
+function showMsg(html, type = 'info') { $('globalMsg').innerHTML = `<div class="msg ${type}">${html}</div>`; }
+function clearMsg() { $('globalMsg').innerHTML = ''; }
+function timeSince(iso) {
+  if (!iso) return '—';
+  const diff = Date.now() - new Date(iso);
+  const h = Math.floor(diff / 3600000);
+  if (h < 1) return 'just now';
+  if (h < 24) return `${h}h ago`;
+  const d = Math.floor(h / 24);
+  return d === 1 ? '1 day ago' : `${d} days ago`;
+}
+function fmtDate(iso) {
+  if (!iso) return '—';
+  return new Date(iso).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' });
+}
 
+// ── State ──────────────────────────────────────────────────────────────────
+let _adoOrg = '';
+let _allProjects = [];
+let _selectedProjects = new Set();
+let _manifests = {};
+
+// ── Init ───────────────────────────────────────────────────────────────────
 window.addEventListener('DOMContentLoaded', async () => {
-  $('ghRepo').value   = localStorage.getItem('dr_gh_repo') || '';
-  $('adoOrg').value   = localStorage.getItem('dr_ado_org') || '';
-  $('adoProject').value = localStorage.getItem('dr_ado_project') || '';
+  $('ghRepo').value  = localStorage.getItem('dr_gh_repo')  || 'riyajgit/workflow-hub';
+  $('ghOwner').value = localStorage.getItem('dr_gh_owner') || '';
   const saved = localStorage.getItem('dr_gh_pat');
   if (saved) $('pat').value = saved;
   updatePatStatus();
   updateRunsLink();
-  await loadAdoDefaults();
-  await loadManifest();
+  await loadPage();
 });
 
-async function loadAdoDefaults() {
-  if ($('adoOrg').value && $('adoProject').value) return;
+async function loadPage() {
+  clearMsg();
+  await Promise.all([loadProjectList(), loadBackupConfig()]);
+  renderProjectSelection();
+  await loadAllManifests();
+  renderProjectCards();
+}
+
+async function loadProjectList() {
   try {
-    const res = await fetch('./ado-repos-cached.json');
+    const res = await fetch('./ado-repos-cached.json', { cache: 'no-store' });
     if (!res.ok) return;
     const d = await res.json();
-    if (!$('adoOrg').value     && d.ado_org)     { $('adoOrg').value     = d.ado_org;     localStorage.setItem('dr_ado_org', d.ado_org); }
-    if (!$('adoProject').value && d.ado_project) { $('adoProject').value = d.ado_project; localStorage.setItem('dr_ado_project', d.ado_project); }
-    $('connStatus').textContent = `${d.ado_org} / ${d.ado_project}`;
-    $('connStatus').style.color = 'var(--success)';
+    _adoOrg = d.ado_org || '';
+    if (d.projects && typeof d.projects === 'object') {
+      _allProjects = Object.keys(d.projects).sort();
+    } else if (d.ado_project) {
+      _allProjects = [d.ado_project];
+    }
   } catch (_) {}
 }
 
-function saveConfig()    { localStorage.setItem('dr_gh_repo', $('ghRepo').value.trim()); updateRunsLink(); }
-function saveAdoConfig() {
-  localStorage.setItem('dr_ado_org',     $('adoOrg').value.trim());
-  localStorage.setItem('dr_ado_project', $('adoProject').value.trim());
-}
-function scheduleReload() {
-  clearTimeout(_reloadTimer);
-  _reloadTimer = setTimeout(loadManifest, 600);
-}
-
-function updateRunsLink() {
-  const gh = ghRepo();
-  const link = $('ghRunsLink');
-  link.href = gh ? `https://github.com/${gh}/actions/workflows/dr-backup-config.yml` : '#';
-  link.style.opacity = gh ? '1' : '.5';
+async function loadBackupConfig() {
+  try {
+    const res = await fetch('./backup-projects.json', { cache: 'no-store' });
+    if (!res.ok) return;
+    const d = await res.json();
+    if (!_adoOrg && d.ado_org) _adoOrg = d.ado_org;
+    _selectedProjects = new Set(d.projects || []);
+  } catch (_) {}
 }
 
-async function loadManifest() {
-  const org     = $('adoOrg').value.trim();
-  const project = $('adoProject').value.trim();
-  if (!org || !project) {
-    $('componentTable').innerHTML = '<p class="empty">Enter ADO Org and Project above to load backup status.</p>';
+async function loadAllManifests() {
+  if (!_adoOrg) return;
+  const org = encodeURIComponent(_adoOrg);
+  const toLoad = [...new Set([..._selectedProjects, ..._allProjects])];
+  const results = await Promise.allSettled(
+    toLoad.map(async p => {
+      try {
+        const res = await fetch(
+          `./dr-config-backup/${org}/${encodeURIComponent(p)}/backup-manifest.json`,
+          { cache: 'no-store' }
+        );
+        if (!res.ok) return { project: p, manifest: null };
+        return { project: p, manifest: await res.json() };
+      } catch (_) { return { project: p, manifest: null }; }
+    })
+  );
+  _manifests = {};
+  results.forEach(r => {
+    if (r.status === 'fulfilled') _manifests[r.value.project] = r.value.manifest;
+  });
+}
+
+// ── Project Selection ──────────────────────────────────────────────────────
+function renderProjectSelection() {
+  const allToShow = [...new Set([..._allProjects, ..._selectedProjects])].sort();
+  if (!allToShow.length) {
+    $('projectSelection').innerHTML = '<p class="empty">No projects found in <code>ado-repos-cached.json</code>. Run the <strong>dr-list-repos</strong> workflow first to populate the project list.</p>';
+    $('selectionStatus').textContent = '';
     return;
   }
-  $('componentTable').innerHTML = '<p class="empty"><span class="spinner"></span>&nbsp;Loading backup manifest&hellip;</p>';
-  try {
-    const url = `./dr-config-backup/${encodeURIComponent(org)}/${encodeURIComponent(project)}/backup-manifest.json`;
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(res.status);
-    _manifest = await res.json();
-    renderManifest(_manifest);
-    await loadWikiRepos(org, project);
-    renderRawFileLinks(_manifest);
-  } catch (_) {
-    $('statsRow').innerHTML = '';
-    $('componentTable').innerHTML = '<div class="msg warning">No backup manifest found for <strong>' + org + ' / ' + project + '</strong>.<br>Click <strong>&#128190; Run Backup Now</strong> to create the first backup.</div>';
-    $('wikiCard').style.display = 'none';
-    $('rawFilesCard').style.display = 'none';
-  }
-}
-
-function renderManifest(m) {
-  const c = m.components;
-  const total = Object.values(c).reduce((s, v) => s + v, 0);
-  const ts = m.backed_up_at ? new Date(m.backed_up_at).toLocaleString() : '—';
-  $('lastBackupTime').textContent = m.backed_up_at ? `Last backup: ${ts}` : '';
-
-  $('statsRow').innerHTML = [
-    { num: total,                  label: 'Total Items' },
-    { num: c.build_pipelines,     label: 'Build Pipelines' },
-    { num: c.release_pipelines,   label: 'Release Pipelines' },
-    { num: c.variable_groups,     label: 'Variable Groups' },
-    { num: c.service_connections, label: 'Service Connections' },
-    { num: c.wiki_repos,          label: 'Wiki Repos' },
-    { num: c.agent_pools,         label: 'Agent Pools' },
-  ].map(s => `<div class="stat-card"><div class="stat-num">${s.num}</div><div class="stat-label">${s.label}</div></div>`).join('');
-
-  const rows = [
-    { label: 'Build Pipelines',     key: 'build_pipelines',     file: 'build-pipelines.json',     note: '' },
-    { label: 'Release Pipelines',   key: 'release_pipelines',   file: 'release-pipelines.json',   note: '' },
-    { label: 'Variable Groups',     key: 'variable_groups',     file: 'variable-groups.json',     note: '&#9888; Secret values masked' },
-    { label: 'Service Connections', key: 'service_connections', file: 'service-connections.json', note: '&#9888; Credentials excluded' },
-    { label: 'Environments',        key: 'environments',        file: 'environments.json',        note: '' },
-    { label: 'Dashboards',          key: 'dashboards',          file: 'dashboards.json',          note: '' },
-    { label: 'Wiki Repos',          key: 'wiki_repos',          file: 'wiki-repos.json',          note: 'Add to repo mirror for content backup' },
-    { label: 'Agent Pools (org)',   key: 'agent_pools',         file: 'agent-pools.json',         note: '' },
-  ].map(r => {
-    const count = c[r.key] || 0;
-    const badge = count > 0
-      ? `<span class="badge-pill badge-success">${count} backed up</span>`
-      : `<span class="badge-pill badge-muted">0</span>`;
-    const ghLink = m.github_repo
-      ? `<a href="https://github.com/${m.github_repo}/blob/main/dr-config-backup/${encodeURIComponent(m.ado_org)}/${encodeURIComponent(m.ado_project)}/${r.file}" target="_blank" rel="noopener" style="font-size:12px;color:var(--primary)">&#128196; View JSON</a>`
-      : '—';
-    return `<tr><td>${r.label}</td><td>${badge}</td><td style="font-size:12px;color:var(--muted)">${r.note}</td><td>${ghLink}</td></tr>`;
+  $('selectionStatus').textContent = `${_selectedProjects.size} of ${allToShow.length} selected`;
+  $('projectSelection').innerHTML = allToShow.map(p => {
+    const checked = _selectedProjects.has(p);
+    const m = _manifests[p];
+    const statusBadge = m
+      ? `<span class="badge-backed">&#10003; backed up ${timeSince(m.backed_up_at)}</span>`
+      : `<span class="badge-not-backed">&#9888; not yet backed up</span>`;
+    return `<div class="project-select-row">
+      <input type="checkbox" class="project-select-check" id="chk-${p.replace(/[^a-z0-9]/gi,'_')}"
+        ${checked ? 'checked' : ''} onchange="toggleProject(${JSON.stringify(p)}, this.checked)">
+      <label class="project-select-name" for="chk-${p.replace(/[^a-z0-9]/gi,'_')}">${p}</label>
+      <span class="project-select-status">${statusBadge}</span>
+    </div>`;
   }).join('');
-
-  $('componentTable').innerHTML = `
-    <p style="font-size:12px;color:var(--muted);margin-bottom:8px">
-      Backed up by <strong>${m.backed_up_by || '—'}</strong> on ${ts}
-      ${m.run_url ? `&mdash; <a href="${m.run_url}" target="_blank" rel="noopener">View run</a>` : ''}
-    </p>
-    <table class="tbl">
-      <thead><tr><th>Component</th><th>Status</th><th>Notes</th><th>Raw File</th></tr></thead>
-      <tbody>${rows}</tbody>
-    </table>`;
 }
 
-async function loadWikiRepos(org, project) {
-  try {
-    const url = `./dr-config-backup/${encodeURIComponent(org)}/${encodeURIComponent(project)}/wiki-repos.json`;
-    const res = await fetch(url);
-    if (!res.ok) { $('wikiCard').style.display = 'none'; return; }
-    const data = await res.json();
-    const wikis = data.value || [];
-    if (!wikis.length) { $('wikiCard').style.display = 'none'; return; }
-    $('wikiCard').style.display = '';
-    const rows = wikis.map(w => {
-      const cloneUrl = w.remoteUrl || `https://dev.azure.com/${org}/${project}/_git/${w.name}`;
-      const ghOwner = (localStorage.getItem('dr_gh_repo') || '').split('/')[0] || '';
-      const ghBackupUrl = ghOwner ? `https://github.com/${ghOwner}/${w.name}_backup` : null;
-      const ghLink = ghBackupUrl
-        ? `<a href="${ghBackupUrl}" target="_blank" rel="noopener" class="btn btn-success btn-sm" style="font-size:11px">&#128214; View Backup on GitHub</a>`
-        : `<a href="repos.html" class="btn btn-outline btn-sm" style="font-size:11px">+ Add to Mirror</a>`;
-      return `<tr>
-        <td><strong>${w.name}</strong></td>
-        <td><span class="badge-pill badge-primary">${w.type || 'wiki'}</span></td>
-        <td><code style="font-size:11px">${cloneUrl}</code></td>
-        <td>${ghLink}</td>
-      </tr>`;
+function toggleProject(name, checked) {
+  if (checked) _selectedProjects.add(name);
+  else _selectedProjects.delete(name);
+  const total = [...new Set([..._allProjects, ..._selectedProjects])].length;
+  $('selectionStatus').textContent = `${_selectedProjects.size} of ${total} selected`;
+}
+
+// ── Per-project Cards ──────────────────────────────────────────────────────
+function renderProjectCards() {
+  const toShow = [..._selectedProjects].sort();
+  $('projectCards').innerHTML = toShow.map(p => renderProjectCard(p)).join('');
+}
+
+function renderProjectCard(project) {
+  const m = _manifests[project];
+  const org = _adoOrg || '';
+  const projectEnc = encodeURIComponent(project);
+  const orgEnc = encodeURIComponent(org);
+
+  let bodyHtml;
+  if (!m) {
+    bodyHtml = `<div style="padding:16px;font-size:13px;color:var(--muted);font-style:italic">
+      No backup found. Click <strong>&#9654; Run Backup</strong> to create the first backup for this project.
+    </div>`;
+  } else {
+    const c = m.components || {};
+    const rows = [
+      { label: 'Build Pipelines',     key: 'build_pipelines',     file: 'build-pipelines.json'     },
+      { label: 'Release Pipelines',   key: 'release_pipelines',   file: 'release-pipelines.json'   },
+      { label: 'Variable Groups',     key: 'variable_groups',     file: 'variable-groups.json',     note: '&#9888; Secrets masked' },
+      { label: 'Service Connections', key: 'service_connections', file: 'service-connections.json', note: '&#9888; Credentials excluded' },
+      { label: 'Environments',        key: 'environments',        file: 'environments.json'         },
+      { label: 'Dashboards',          key: 'dashboards',          file: 'dashboards.json'           },
+      { label: 'Wiki Repos',          key: 'wiki_repos',          file: 'wiki-repos.json'           },
+      { label: 'Agent Pools (org)',   key: 'agent_pools',         file: 'agent-pools.json'          },
+    ].map(r => {
+      const count = c[r.key] || 0;
+      const badge = count > 0
+        ? `<span class="badge-pill badge-success">${count}</span>`
+        : `<span class="badge-pill badge-muted">0</span>`;
+      const ghBase = m.github_repo
+        ? `https://github.com/${m.github_repo}/blob/main/dr-config-backup/${orgEnc}/${projectEnc}`
+        : null;
+      const ghLink = ghBase
+        ? `<a href="${ghBase}/${r.file}" target="_blank" rel="noopener" style="font-size:11px;color:var(--primary)">&#128196; JSON</a>`
+        : '';
+      return `<tr><td>${r.label}</td><td>${badge}</td><td style="font-size:11px;color:var(--muted)">${r.note || ''}</td><td>${ghLink}</td></tr>`;
     }).join('');
-    $('wikiTable').innerHTML = `
+
+    const wikiCount = c.wiki_repos || 0;
+    let wikiSection = '';
+    if (wikiCount > 0) {
+      const owner = ghOwner();
+      const ghWikiSearch = owner
+        ? `<a href="https://github.com/${owner}?q=_backup&type=repository" target="_blank" rel="noopener" class="btn btn-outline btn-sm" style="font-size:11px">&#128214; View Wiki Backups on GitHub</a>`
+        : '';
+      const ghFilesLink = m.github_repo
+        ? `<a href="https://github.com/${m.github_repo}/tree/main/dr-config-backup/${orgEnc}/${projectEnc}" target="_blank" rel="noopener" class="btn btn-outline btn-sm" style="font-size:11px">&#128196; All JSON Files</a>`
+        : '';
+      wikiSection = `<div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border)">
+        <div style="font-weight:600;font-size:13px;margin-bottom:6px">&#128214; Wiki Repos: ${wikiCount} backed up</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">${ghWikiSearch}${ghFilesLink}</div>
+      </div>`;
+    }
+
+    bodyHtml = `<div style="padding:16px">
+      <p style="font-size:12px;color:var(--muted);margin-bottom:8px">
+        Backed up by <strong>${m.backed_up_by || '—'}</strong> on ${fmtDate(m.backed_up_at)}
+        ${m.run_url ? `&mdash; <a href="${m.run_url}" target="_blank" rel="noopener">View run</a>` : ''}
+      </p>
       <table class="tbl">
-        <thead><tr><th>Wiki Name</th><th>Type</th><th>Clone URL</th><th>Action</th></tr></thead>
+        <thead><tr><th>Component</th><th>Count</th><th>Notes</th><th>Raw File</th></tr></thead>
         <tbody>${rows}</tbody>
-      </table>`;
-  } catch (_) { $('wikiCard').style.display = 'none'; }
+      </table>
+      ${wikiSection}
+    </div>`;
+  }
+
+  const ts = m ? `Last backup: ${fmtDate(m.backed_up_at)} (${timeSince(m.backed_up_at)})` : 'Never backed up';
+  const dot = m ? '&#x1F7E2;' : '&#x1F7E1;';
+
+  return `<div class="project-backup-card">
+    <div class="project-backup-header">
+      <span style="font-size:18px">${dot}</span>
+      <span class="project-backup-name">${project}</span>
+      <span class="project-backup-time">${ts}</span>
+      <button class="btn btn-primary btn-sm" onclick="runProjectBackup(${JSON.stringify(project)})">&#9654; Run Backup</button>
+    </div>
+    ${bodyHtml}
+  </div>`;
 }
 
-function renderRawFileLinks(m) {
-  if (!m.github_repo) { $('rawFilesCard').style.display = 'none'; return; }
-  $('rawFilesCard').style.display = '';
-  const files = ['build-pipelines','release-pipelines','variable-groups','service-connections','environments','dashboards','wiki-repos','agent-pools'];
-  const base = `https://github.com/${m.github_repo}/blob/main/dr-config-backup/${encodeURIComponent(m.ado_org)}/${encodeURIComponent(m.ado_project)}`;
-  $('rawFileLinks').innerHTML = files.map(f =>
-    `<a href="${base}/${f}.json" target="_blank" rel="noopener" class="tag" style="text-decoration:none">&#128196; ${f}.json</a>`
-  ).join('');
+// ── Save backup config ─────────────────────────────────────────────────────
+async function saveBackupConfig() {
+  if (!pat()) { $('settingsDrawer').classList.remove('hidden'); $('pat').focus(); showMsg('Enter your GitHub PAT to save the backup configuration.', 'info'); return; }
+  if (!ghRepo()) { $('settingsDrawer').classList.remove('hidden'); showMsg('Enter the GitHub Repository in Settings.', 'error'); return; }
+
+  const content = JSON.stringify({
+    ado_org: _adoOrg,
+    projects: [..._selectedProjects].sort(),
+    updated_at: new Date().toISOString(),
+    updated_by: 'portal'
+  }, null, 2);
+
+  showMsg('<span class="spinner"></span>&nbsp;Saving backup configuration&hellip;');
+  try {
+    const getRes = await fetch(
+      `https://api.github.com/repos/${ghRepo()}/contents/docs/backup-projects.json`,
+      { headers: apiHeaders() }
+    );
+    const sha = getRes.ok ? (await getRes.json()).sha : undefined;
+    const body = { message: 'chore(portal): update backup-projects.json', content: btoa(unescape(encodeURIComponent(content))) };
+    if (sha) body.sha = sha;
+
+    const putRes = await fetch(
+      `https://api.github.com/repos/${ghRepo()}/contents/docs/backup-projects.json`,
+      { method: 'PUT', headers: { ...apiHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify(body) }
+    );
+    if (!putRes.ok) throw new Error(`HTTP ${putRes.status}: ${await putRes.text()}`);
+
+    showMsg(`&#10003; Saved — ${[..._selectedProjects].length} project(s): <strong>${[..._selectedProjects].sort().join(', ')}</strong>`, 'success');
+    renderProjectSelection();
+  } catch (e) { showMsg(`Save failed: ${e.message}`, 'error'); }
 }
 
-function togglePat() { $('patDrawer').classList.toggle('hidden'); }
+// ── Trigger backup ─────────────────────────────────────────────────────────
+async function runAllBackup() {
+  if (!_selectedProjects.size) { showMsg('Select at least one project first.', 'error'); return; }
+  await _triggerBackup([..._selectedProjects].sort().join(','));
+}
+
+async function runProjectBackup(project) { await _triggerBackup(project); }
+
+async function _triggerBackup(projectsInput) {
+  if (!ghRepo()) { $('settingsDrawer').classList.remove('hidden'); showMsg('Enter GitHub Repository in Settings.', 'error'); return; }
+  if (!pat()) { $('settingsDrawer').classList.remove('hidden'); $('pat').focus(); showMsg('Enter your GitHub PAT to trigger the backup.', 'info'); return; }
+
+  showMsg(`<span class="spinner"></span>&nbsp;Triggering backup for: <strong>${projectsInput}</strong>&hellip;`);
+  try {
+    const res = await fetch(
+      `https://api.github.com/repos/${ghRepo()}/actions/workflows/dr-backup-config.yml/dispatches`,
+      { method: 'POST', headers: { ...apiHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ref: 'main', inputs: { ado_org: _adoOrg, ado_project: projectsInput } }) }
+    );
+    if (res.status === 204) {
+      showMsg(`Backup triggered &#10003; for <strong>${projectsInput}</strong><br>
+        Wait ~2&ndash;5 minutes, then click <strong>&#8635; Refresh</strong> to see updated status.<br>
+        <a href="https://github.com/${ghRepo()}/actions/workflows/dr-backup-config.yml" target="_blank" rel="noopener">
+          &#128279; Monitor the workflow run
+        </a>`, 'success');
+    } else throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+  } catch (e) { showMsg(`Trigger failed: ${e.message}`, 'error'); }
+}
+
+// ── Settings helpers ───────────────────────────────────────────────────────
+function toggleSettings() { $('settingsDrawer').classList.toggle('hidden'); }
+function saveConfig() {
+  localStorage.setItem('dr_gh_repo',  $('ghRepo').value.trim());
+  localStorage.setItem('dr_gh_owner', $('ghOwner').value.trim());
+  updateRunsLink();
+}
 function onPatInput() {
   const val = $('pat').value.trim();
   if (val) { localStorage.setItem('dr_gh_pat', val); updatePatStatus(); }
@@ -331,32 +434,10 @@ function updatePatStatus() {
   if (pat()) { el.textContent = '✓ PAT saved.'; el.className = 'pat-status ok'; }
   else { el.textContent = 'No PAT saved.'; el.className = 'pat-status none'; }
 }
-
-async function triggerBackup() {
-  const org     = $('adoOrg').value.trim();
-  const project = $('adoProject').value.trim();
-  if (!org)     { showMsg('Enter an ADO Organization.', 'error'); return; }
-  if (!project) { showMsg('Enter an ADO Project.', 'error'); return; }
-  if (!ghRepo()) { showMsg('Set the GitHub Repository.', 'error'); return; }
-  if (!pat()) {
-    $('patDrawer').classList.remove('hidden');
-    $('pat').focus();
-    showMsg('Enter your GitHub PAT to trigger the backup workflow.', 'info');
-    return;
-  }
-  showMsg('<span class="spinner"></span>&nbsp;Triggering config backup workflow&hellip;');
-  try {
-    const res = await fetch(`https://api.github.com/repos/${ghRepo()}/actions/workflows/dr-backup-config.yml/dispatches`,
-      { method: 'POST', headers: { ...apiHeaders(), 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ref: 'main', inputs: { ado_org: org, ado_project: project } }) });
-    if (res.status === 204) {
-      showMsg(`Backup triggered &#10003; for <strong>${org} / ${project}</strong><br>
-        Wait ~2 minutes, then click <strong>&#8635; Refresh</strong> to see the updated summary.<br>
-        <a href="${ghRepo() ? `https://github.com/${ghRepo()}/actions/workflows/dr-backup-config.yml` : '#'}" target="_blank" rel="noopener">
-          &#128279; Monitor the workflow run
-        </a>`, 'success');
-    } else throw new Error(`HTTP ${res.status}: ${await res.text()}`);
-  } catch (e) { showMsg(`Backup trigger failed: ${e.message}`, 'error'); }
+function updateRunsLink() {
+  const gh = ghRepo();
+  const link = $('ghRunsLink');
+  if (link) { link.href = gh ? `https://github.com/${gh}/actions/workflows/dr-backup-config.yml` : '#'; link.style.opacity = gh ? '1' : '.5'; }
 }
 </script>
 </body>
