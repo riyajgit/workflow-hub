@@ -368,17 +368,29 @@ async function _doSave() {
   }).sort((a, b) => a.ado_project.localeCompare(b.ado_project) || a.ado_repo.localeCompare(b.ado_repo));
 
   const encoded = btoa(unescape(encodeURIComponent(JSON.stringify(repoList, null, 2))));
-  // Helper: write a single file via Contents API (fetches SHA first, then PUTs)
+  // Helper: write a single file via Contents API (fetches fresh SHA, then PUTs; retries once on 409)
   async function writeFile(path, content, message) {
-    let sha = null;
-    const getRes = await fetch(`https://api.github.com/repos/${ghRepo()}/contents/${path}`, { headers: apiHeaders(), cache: 'no-store' });
-    if (getRes.ok) { const d = await getRes.json(); sha = d.sha; }
-    const body = { message, content, branch: 'main' };
-    if (sha) body.sha = sha;
-    const putRes = await fetch(`https://api.github.com/repos/${ghRepo()}/contents/${path}`, {
-      method: 'PUT', headers: { ...apiHeaders(), 'Content-Type': 'application/json' },
-      body: JSON.stringify(body)
-    });
+    async function fetchSha() {
+      const r = await fetch(`https://api.github.com/repos/${ghRepo()}/contents/${path}`,
+        { headers: apiHeaders(), cache: 'no-store' });
+      if (r.ok) { const d = await r.json(); return d.sha; }
+      return null;
+    }
+    async function trySave(sha) {
+      const body = { message, content, branch: 'main' };
+      if (sha) body.sha = sha;
+      return fetch(`https://api.github.com/repos/${ghRepo()}/contents/${path}`, {
+        method: 'PUT', headers: { ...apiHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+    }
+    let sha = await fetchSha();
+    let putRes = await trySave(sha);
+    if (putRes.status === 409) {
+      // SHA was stale (concurrent commit) — re-fetch and retry once
+      sha = await fetchSha();
+      putRes = await trySave(sha);
+    }
     if (!putRes.ok) throw new Error(`${path} → HTTP ${putRes.status}: ${await putRes.text()}`);
   }
   showMsg('<span class="spinner"></span>&nbsp;Saving selection to repos.json&hellip;');
