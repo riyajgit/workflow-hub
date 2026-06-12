@@ -1,0 +1,316 @@
+name: DR - Weekly Immutable Backup to Azure Blob
+
+# PURPOSE: Reads all enabled repos from repos.json, clones each ADO repo as a
+#          git bundle, and uploads bundles to Azure Blob Storage via SAS token.
+#          When the Azure container has a time-based immutability policy applied,
+#          blobs cannot be modified or deleted until the retention period expires
+#          — making this backup ransomware-resistant (WORM storage).
+#
+# BLOB LAYOUT:
+#   {container}/
+#     YYYY-MM-DD/
+#       {ado_org}/{ado_project}/{ado_repo}.bundle   <- full git history
+#       manifest.json                                <- index of this backup set
+#
+# SECRETS REQUIRED (Settings -> Secrets -> Actions):
+#   ADO_PAT                  - Azure DevOps PAT with Code (Read) scope
+#   AZURE_STORAGE_ACCOUNT    - Storage account name  e.g. "drimmutablestorage"
+#   AZURE_STORAGE_CONTAINER  - Container name        e.g. "dr-immutable-backups"
+#   AZURE_SAS_TOKEN          - SAS token string WITHOUT leading '?'
+#                              Minimum permissions: Write, Create, List
+#                              Set expiry >= 1 year; rotate annually.
+#
+# ── AZURE ONE-TIME SETUP ─────────────────────────────────────────────────────
+# Run once in Azure CLI / Cloud Shell to create storage and apply WORM policy:
+#
+#   az storage account create \
+#     --name drimmutablestorage \
+#     --resource-group YOUR_RG \
+#     --sku Standard_LRS \
+#     --allow-blob-public-access false \
+#     --min-tls-version TLS1_2
+#
+#   az storage container create \
+#     --name dr-immutable-backups \
+#     --account-name drimmutablestorage
+#
+#   # Apply 30-day WORM time-based retention policy:
+#   az storage container immutability-policy create \
+#     --account-name drimmutablestorage \
+#     --container-name dr-immutable-backups \
+#     --period 30
+#
+#   # After testing, lock the policy (cannot be shortened once locked):
+#   ETAG=$(az storage container immutability-policy show \
+#     --account-name drimmutablestorage \
+#     --container-name dr-immutable-backups \
+#     --query etag -o tsv)
+#   az storage container immutability-policy lock \
+#     --account-name drimmutablestorage \
+#     --container-name dr-immutable-backups \
+#     --if-match "$ETAG"
+#
+# ── PRODUCTION UPGRADE (replace SAS with OIDC / no static keys) ─────────────
+# 1. Create App Registration in Azure AD
+# 2. Add federated credential: repo=riyajgit/workflow-hub, branch=main
+# 3. Grant App "Storage Blob Data Contributor" on the container
+# 4. Replace AZURE_SAS_TOKEN secret with AZURE_CLIENT_ID, AZURE_TENANT_ID,
+#    AZURE_SUBSCRIPTION_ID and add the azure/login@v2 step before upload
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  schedule:
+    - cron: '0 2 * * 0'   # Every Sunday at 02:00 UTC
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run — clone and bundle repos but skip Azure upload'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dr-immutable-backup
+  cancel-in-progress: false   # never interrupt an in-progress backup
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── Validate secrets ────────────────────────────────────────────────
+      - name: Validate secrets
+        env:
+          ADO_PAT:                 ${{ secrets.ADO_PAT }}
+          AZURE_STORAGE_ACCOUNT:   ${{ secrets.AZURE_STORAGE_ACCOUNT }}
+          AZURE_STORAGE_CONTAINER: ${{ secrets.AZURE_STORAGE_CONTAINER }}
+          AZURE_SAS_TOKEN:         ${{ secrets.AZURE_SAS_TOKEN }}
+        run: |
+          MISSING=""
+          [ -z "$ADO_PAT" ]                 && MISSING="$MISSING ADO_PAT"
+          [ -z "$AZURE_STORAGE_ACCOUNT" ]   && MISSING="$MISSING AZURE_STORAGE_ACCOUNT"
+          [ -z "$AZURE_STORAGE_CONTAINER" ] && MISSING="$MISSING AZURE_STORAGE_CONTAINER"
+          [ -z "$AZURE_SAS_TOKEN" ]         && MISSING="$MISSING AZURE_SAS_TOKEN"
+          if [ -n "$MISSING" ]; then
+            echo "::error::Missing required secrets:$MISSING"
+            echo "Add them at: Settings -> Secrets -> Actions"
+            exit 1
+          fi
+          echo "All required secrets present."
+
+      # ── Load enabled repos from repos.json ──────────────────────────────
+      - name: Load enabled repos from repos.json
+        id: load-repos
+        run: |
+          REPOS=$(jq -c '[ .[] | select((.enabled // true) == true) ]' repos.json)
+          COUNT=$(echo "$REPOS" | jq 'length')
+          if [ "$COUNT" -eq 0 ]; then
+            echo "::error::No enabled repos found in repos.json."
+            exit 1
+          fi
+          echo "Repos to back up: $COUNT"
+          echo "repos=$REPOS"                   >> "$GITHUB_OUTPUT"
+          echo "count=$COUNT"                   >> "$GITHUB_OUTPUT"
+          echo "date=$(date -u '+%Y-%m-%d')"    >> "$GITHUB_OUTPUT"
+
+      # ── Clone each repo and create a portable git bundle ────────────────
+      - name: Clone and bundle repos
+        id: bundle
+        env:
+          ADO_PAT: ${{ secrets.ADO_PAT }}
+          REPOS:   ${{ steps.load-repos.outputs.repos }}
+          TODAY:   ${{ steps.load-repos.outputs.date }}
+        run: |
+          BUNDLE_ROOT="bundles/$TODAY"
+          MANIFEST_ENTRIES=""
+          SUCCESS=0
+          FAILED=0
+          FAILED_LIST=""
+
+          while IFS= read -r row; do
+            ORG=$(echo     "$row" | jq -r '.ado_org')
+            PROJECT=$(echo "$row" | jq -r '.ado_project')
+            REPO=$(echo    "$row" | jq -r '.ado_repo')
+
+            ORG_ENC=$(printf '%s' "$ORG"     | python3 -c "import sys,urllib.parse; print(urllib.parse.quote(sys.stdin.read(),safe=''))")
+            PROJ_ENC=$(printf '%s' "$PROJECT" | python3 -c "import sys,urllib.parse; print(urllib.parse.quote(sys.stdin.read(),safe=''))")
+            REPO_ENC=$(printf '%s' "$REPO"    | python3 -c "import sys,urllib.parse; print(urllib.parse.quote(sys.stdin.read(),safe=''))")
+
+            CLONE_URL="https://:${ADO_PAT}@dev.azure.com/${ORG_ENC}/${PROJ_ENC}/_git/${REPO_ENC}"
+            CLONE_DIR="/tmp/clones/${ORG}/${PROJECT}/${REPO}.git"
+            BUNDLE_DIR="${BUNDLE_ROOT}/${ORG}/${PROJECT}"
+            BUNDLE_FILE="${BUNDLE_DIR}/${REPO}.bundle"
+
+            echo ""
+            echo "-- ${ORG} / ${PROJECT} / ${REPO} --"
+            mkdir -p "$BUNDLE_DIR" "$(dirname "$CLONE_DIR")"
+
+            # Clone as bare mirror: captures all branches, tags, notes
+            if git -c credential.helper='' clone --mirror "$CLONE_URL" "$CLONE_DIR" 2>&1; then
+              BRANCHES=$(git -C "$CLONE_DIR" branch | wc -l | tr -d ' ')
+              HEAD_SHA=$(git -C "$CLONE_DIR" rev-parse HEAD 2>/dev/null || echo "empty")
+
+              # Bundle all refs into a single portable binary
+              if git -C "$CLONE_DIR" bundle create "$GITHUB_WORKSPACE/$BUNDLE_FILE" --all 2>&1; then
+                SIZE=$(du -sh "$GITHUB_WORKSPACE/$BUNDLE_FILE" | cut -f1)
+                echo "  ok: $BUNDLE_FILE  ($SIZE, $BRANCHES branch(es), HEAD=$HEAD_SHA)"
+                ENTRY="{\"org\":\"${ORG}\",\"project\":\"${PROJECT}\",\"repo\":\"${REPO}\""
+                ENTRY="${ENTRY},\"bundle\":\"${BUNDLE_FILE}\",\"head_sha\":\"${HEAD_SHA}\""
+                ENTRY="${ENTRY},\"branches\":${BRANCHES},\"size\":\"${SIZE}\",\"status\":\"ok\"}"
+                MANIFEST_ENTRIES="${MANIFEST_ENTRIES}${MANIFEST_ENTRIES:+,}${ENTRY}"
+                SUCCESS=$((SUCCESS + 1))
+              else
+                echo "  FAIL: bundle creation failed for $REPO"
+                ENTRY="{\"org\":\"${ORG}\",\"project\":\"${PROJECT}\",\"repo\":\"${REPO}\",\"status\":\"bundle_failed\"}"
+                MANIFEST_ENTRIES="${MANIFEST_ENTRIES}${MANIFEST_ENTRIES:+,}${ENTRY}"
+                FAILED=$((FAILED + 1))
+                FAILED_LIST="$FAILED_LIST ${ORG}/${PROJECT}/${REPO}"
+              fi
+            else
+              echo "  FAIL: clone failed for $REPO  (verify ADO_PAT has Code - Read scope)"
+              ENTRY="{\"org\":\"${ORG}\",\"project\":\"${PROJECT}\",\"repo\":\"${REPO}\",\"status\":\"clone_failed\"}"
+              MANIFEST_ENTRIES="${MANIFEST_ENTRIES}${MANIFEST_ENTRIES:+,}${ENTRY}"
+              FAILED=$((FAILED + 1))
+              FAILED_LIST="$FAILED_LIST ${ORG}/${PROJECT}/${REPO}"
+            fi
+
+            # Delete clone immediately to keep runner disk usage low
+            rm -rf "$CLONE_DIR"
+
+          done < <(echo "$REPOS" | jq -c '.[]')
+
+          # Write manifest.json alongside the bundles
+          BACKED_AT=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+          cat > "${BUNDLE_ROOT}/manifest.json" <<MANIFEST_EOF
+          {
+            "backup_date":  "$TODAY",
+            "backed_up_at": "$BACKED_AT",
+            "backed_up_by": "${{ github.actor }}",
+            "run_url":      "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}",
+            "total_repos":  ${{ steps.load-repos.outputs.count }},
+            "succeeded":    $SUCCESS,
+            "failed":       $FAILED,
+            "repos": [$MANIFEST_ENTRIES]
+          }
+          MANIFEST_EOF
+
+          echo ""
+          echo "Bundle complete: $SUCCESS succeeded, $FAILED failed"
+          [ -n "$FAILED_LIST" ] && echo "Failed:$FAILED_LIST"
+
+          echo "bundle_root=$BUNDLE_ROOT" >> "$GITHUB_OUTPUT"
+          echo "success=$SUCCESS"         >> "$GITHUB_OUTPUT"
+          echo "failed=$FAILED"           >> "$GITHUB_OUTPUT"
+
+          if [ "$SUCCESS" -eq 0 ]; then
+            echo "::error::Every repo failed to bundle. Verify ADO_PAT has Code - Read scope."
+            exit 1
+          fi
+
+      # ── Upload bundles to Azure Immutable Blob Storage ──────────────────
+      - name: Upload bundles to Azure Blob Storage
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        env:
+          AZURE_STORAGE_ACCOUNT:   ${{ secrets.AZURE_STORAGE_ACCOUNT }}
+          AZURE_STORAGE_CONTAINER: ${{ secrets.AZURE_STORAGE_CONTAINER }}
+          AZURE_SAS_TOKEN:         ${{ secrets.AZURE_SAS_TOKEN }}
+          BUNDLE_ROOT:             ${{ steps.bundle.outputs.bundle_root }}
+          TODAY:                   ${{ steps.load-repos.outputs.date }}
+        run: |
+          BLOB_BASE="https://${AZURE_STORAGE_ACCOUNT}.blob.core.windows.net/${AZURE_STORAGE_CONTAINER}"
+          UPLOAD_OK=0
+          UPLOAD_FAIL=0
+
+          while IFS= read -r LOCAL_FILE; do
+            # Blob path strips "bundles/" prefix: YYYY-MM-DD/org/project/repo.bundle
+            BLOB_PATH="${LOCAL_FILE#bundles/}"
+            FILE_SIZE=$(stat -c%s "$LOCAL_FILE")
+            DATE_HDR=$(date -u '+%a, %d %b %Y %H:%M:%S GMT')
+
+            HTTP=$(curl -sS -w "%{http_code}" -o /tmp/az-resp.txt \
+              -X PUT \
+              -H "x-ms-blob-type: BlockBlob" \
+              -H "x-ms-date: ${DATE_HDR}" \
+              -H "Content-Type: application/octet-stream" \
+              -H "Content-Length: ${FILE_SIZE}" \
+              --data-binary "@${LOCAL_FILE}" \
+              "${BLOB_BASE}/${BLOB_PATH}?${AZURE_SAS_TOKEN}")
+
+            if [ "$HTTP" = "201" ]; then
+              SIZE=$(du -sh "$LOCAL_FILE" | cut -f1)
+              echo "  uploaded: $BLOB_PATH  ($SIZE)"
+              UPLOAD_OK=$((UPLOAD_OK + 1))
+            else
+              echo "  FAILED:   $BLOB_PATH  -- HTTP $HTTP"
+              echo "            $(head -c 300 /tmp/az-resp.txt)"
+              UPLOAD_FAIL=$((UPLOAD_FAIL + 1))
+            fi
+          done < <(find "$BUNDLE_ROOT" -type f)
+
+          echo ""
+          echo "Upload complete: $UPLOAD_OK uploaded, $UPLOAD_FAIL failed"
+          echo "Blobs at: ${BLOB_BASE}/${TODAY}/"
+
+          echo "upload_ok=${UPLOAD_OK}"     >> "$GITHUB_ENV"
+          echo "upload_fail=${UPLOAD_FAIL}" >> "$GITHUB_ENV"
+
+          if [ "$UPLOAD_OK" -eq 0 ]; then
+            echo "::error::All uploads failed. Check AZURE_SAS_TOKEN has Write+Create permissions and is not expired."
+            exit 1
+          fi
+
+      # ── Dry run: show what would be uploaded ────────────────────────────
+      - name: Dry run — list bundles (no upload)
+        if: ${{ github.event.inputs.dry_run == 'true' }}
+        env:
+          BUNDLE_ROOT: ${{ steps.bundle.outputs.bundle_root }}
+        run: |
+          echo "DRY RUN -- bundles created but NOT uploaded to Azure:"
+          echo ""
+          find "$BUNDLE_ROOT" -type f | while read -r f; do
+            printf "  %-8s %s\n" "$(du -sh "$f" | cut -f1)" "${f#bundles/}"
+          done
+
+      # ── Step summary ─────────────────────────────────────────────────────
+      - name: Write step summary
+        if: always()
+        env:
+          TODAY:             ${{ steps.load-repos.outputs.date }}
+          TOTAL:             ${{ steps.load-repos.outputs.count }}
+          SUCCESS:           ${{ steps.bundle.outputs.success }}
+          FAILED:            ${{ steps.bundle.outputs.failed }}
+          BUNDLE_ROOT:       ${{ steps.bundle.outputs.bundle_root }}
+          DRY_RUN:           ${{ github.event.inputs.dry_run }}
+          STORAGE_ACCOUNT:   ${{ secrets.AZURE_STORAGE_ACCOUNT }}
+          STORAGE_CONTAINER: ${{ secrets.AZURE_STORAGE_CONTAINER }}
+        run: |
+          {
+            echo "## DR Immutable Backup -- $TODAY"
+            echo ""
+            [ "$DRY_RUN" = "true" ] && echo "> **DRY RUN** -- no Azure upload performed." && echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Repos in repos.json | $TOTAL |"
+            echo "| Bundled successfully | $SUCCESS |"
+            echo "| Bundle failures | $FAILED |"
+            if [ "$DRY_RUN" != "true" ]; then
+              echo "| Azure uploads OK | ${upload_ok:-n/a} |"
+              echo "| Azure upload failures | ${upload_fail:-n/a} |"
+              echo "| Blob prefix | \`https://${STORAGE_ACCOUNT}.blob.core.windows.net/${STORAGE_CONTAINER}/${TODAY}/\` |"
+            fi
+            echo ""
+            echo "### Files created"
+            echo "\`\`\`"
+            find "$BUNDLE_ROOT" -type f 2>/dev/null | while read -r f; do
+              printf "%-8s %s\n" "$(du -sh "$f" | cut -f1)" "${f#bundles/}"
+            done
+            echo "\`\`\`"
+          } >> "$GITHUB_STEP_SUMMARY"
