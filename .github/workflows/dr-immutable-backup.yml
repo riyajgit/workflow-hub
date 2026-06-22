@@ -232,6 +232,8 @@ jobs:
           while IFS= read -r LOCAL_FILE; do
             # Blob path strips "bundles/" prefix: YYYY-MM-DD/org/project/repo.bundle
             BLOB_PATH="${LOCAL_FILE#bundles/}"
+            # URL-encode the path so project names with spaces (e.g. "Cloud Platform") work
+            BLOB_PATH_ENC=$(printf '%s' "$BLOB_PATH" | python3 -c "import sys,urllib.parse; print(urllib.parse.quote(sys.stdin.read(), safe='/'))")
             FILE_SIZE=$(stat -c%s "$LOCAL_FILE")
             DATE_HDR=$(date -u '+%a, %d %b %Y %H:%M:%S GMT')
 
@@ -242,7 +244,7 @@ jobs:
               -H "Content-Type: application/octet-stream" \
               -H "Content-Length: ${FILE_SIZE}" \
               --data-binary "@${LOCAL_FILE}" \
-              "${BLOB_BASE}/${BLOB_PATH}?${AZURE_SAS_TOKEN}")
+              "${BLOB_BASE}/${BLOB_PATH_ENC}?${AZURE_SAS_TOKEN}")
 
             if [ "$HTTP" = "201" ]; then
               SIZE=$(du -sh "$LOCAL_FILE" | cut -f1)
