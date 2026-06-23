@@ -34,5 +34,11 @@
     "ado_project": "Test1",
     "ado_repo": "selfhost",
     "enabled": true
+  },
+  {
+    "ado_org": "binhsps",
+    "ado_project": "Test1",
+    "ado_repo": "Test1",
+    "enabled": true
   }
 ]
