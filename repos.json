@@ -14,6 +14,12 @@
   {
     "ado_org": "binhsps",
     "ado_project": "Test1",
+    "ado_repo": "env-tf-modules",
+    "enabled": true
+  },
+  {
+    "ado_org": "binhsps",
+    "ado_project": "Test1",
     "ado_repo": "hostedagent",
     "enabled": true
   },
